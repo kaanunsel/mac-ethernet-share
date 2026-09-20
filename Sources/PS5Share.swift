@@ -59,6 +59,14 @@ func run(_ path: String, _ args: [String], input: String? = nil) throws -> Strin
     let pipe = Pipe()
     task.standardInput = input == nil ? FileHandle.nullDevice : pipe.fileHandleForReading
     try task.run()
+    // Process receives duplicated descriptors. Close our unused pipe ends so EOF is
+    // observable after the child exits; retaining the writer makes readDataToEndOfFile hang.
+    if receipt == nil {
+        try output.fileHandleForWriting.close()
+    }
+    if input != nil {
+        try pipe.fileHandleForReading.close()
+    }
     // A stuck utility must not leave AC/removal events blocked indefinitely.
     let deadline = DispatchSource.makeTimerSource(queue: .global())
     deadline.schedule(deadline: .now() + 5)
@@ -617,6 +625,10 @@ do {
     case "watch": try watch()
     case "observe": observing = true; try watch()
     case "self-test": try selfTest()
+    case "process-test":
+        let output = try run("/usr/bin/printf", ["ps5share-process-ok"])
+        guard output == "ps5share-process-ok" else { throw Failure("Child process output/EOF test failed") }
+        print("Passed: child process output and EOF handling.")
     case "rules": print(pfRules("en9"), terminator: "")
     case "status":
         let c = conditions()
@@ -634,7 +646,7 @@ do {
         try run("/bin/launchctl", ["kill", "SIGUSR1", "system/local.ps5share"])
         print(command == "stop" ? "Paused for this boot; daemon will clean up. Reboot or run start to resume automatic sharing." : "Automatic sharing resumed; waiting for adapter, AC and Wi-Fi.")
     case "recover": try acquireLock(); try cleanup(sleepAfter: false)
-    default: throw Failure("Usage: ps5shared {watch|observe|status|start|stop|recover|self-test|rules}")
+    default: throw Failure("Usage: ps5shared {watch|observe|status|start|stop|recover|self-test|process-test|rules}")
     }
 } catch {
     log("ERROR: \(error)")
