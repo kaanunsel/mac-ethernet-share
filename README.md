@@ -1,250 +1,200 @@
-# PS5 Ethernet paylaşımı — otomatik macOS servisi
+# Mac Ethernet Share
 
-Mac'in Wi-Fi bağlantısını, kayıtlı USB Ethernet adaptörü üzerinden PS5'e paylaşır.
-`launchd` altında çalışan Swift servis adaptör, ağ ve güç olaylarını izler.
-Terminal veya oturum kilidini açmak normal kullanımda gerekmez. Kurulum yönetici yetkisi ister.
+Share a Mac's Wi-Fi connection with an Ethernet-connected device: a computer,
+game console, development board, or another device that supports manual IPv4 settings.
+A Swift daemon watches network and hardware events and starts sharing when the
+selected Ethernet adapter and upstream connection are ready.
 
-## Davranış
+No third-party runtime, DHCP server, or device-specific software is required.
+Sharing supports **one client IPv4 address at a time**.
 
-Paylaşım yalnızca şu koşullar birlikte sağlanınca başlar:
+## Requirements
 
-- ASIX `0x0b95:0x1790`, seri `0074EE11`, MAC `9c:69:d3:74:ee:11` adaptörü takılıdır.
-- Ethernet link'i aktiftir; PS5/kablo bağlıdır.
-- Birincil IPv4 çıkışı `en0` Wi-Fi'dır ve link-local olmayan bir IPv4 adresi vardır.
-- Otomasyon manuel olarak duraklatılmamıştır.
+- macOS with Xcode Command Line Tools (`xcode-select --install`).
+- An Ethernet adapter supported by macOS and a working Wi-Fi connection.
+- Administrator access to install and control the service.
+- A client that supports a static IPv4 address.
 
-Mac AC gücünde veya bataryada olabilir. Güç kaynağı durum için izlenip loglanır ancak
-paylaşımı başlatma ya da durdurma koşulu değildir.
+The implementation uses macOS PF, IOKit, SystemConfiguration, and `launchd`.
+Hardware behavior, especially closed-lid operation, varies by Mac and macOS release.
 
-`en9` sabitlenmez; arayüz kimlik üzerinden bulunur. Wi-Fi SSID kontrolü yapılmaz:
-eduroam dışındaki bir Wi-Fi ağı da koşulları sağlayabilir. VPN'in birincil arayüzü
-değiştirdiği durumlarda paylaşım kapanır; eşzamanlı VPN/Internet Sharing kullanımını desteklemiyoruz.
+## Configure and install
 
-| Senaryo | Davranış |
-| --- | --- |
-| Mac uyanık veya kilit ekranında, adaptör takılıyor | Koşullar sağlanınca otomatik başlar |
-| Adaptör Mac uyurken takılıyor, sonra kapak açılıyor | Uyanınca mevcut cihazlar yeniden taranır; en geç yaklaşık 10 saniye içinde değerlendirilir |
-| Paylaşım aktifken kapak kapanıyor | AC veya bataryada geçici `SleepDisabled` ayarıyla paylaşım sürdürülür |
-| Adaptör, Ethernet link'i veya Wi-Fi çıkışı kayboluyor | Paylaşım temizlenir; kapak kapalıysa ardından uyku istenir |
-| Paylaşım aktifken AC çıkarılıyor | Paylaşım bataryada kesintisiz sürer; uyku override'ı korunur |
-| Adaptör yok | Uyku ayarlarına dokunulmaz; uyanma zamanlayıcısı kurulmaz |
-| Servis çöküyor veya yeniden başlatılıyor | Kalıcı journal okunur, eski oturum temizlenir, koşullar yeniden değerlendirilir |
-| Mac kapatılıp yeniden açılıyor | Sistem daemon'ı boot sırasında yeniden yüklenir; adaptör sonradan takıldığında otomasyon çalışır |
+Clone the repository and inspect the hardware ports:
 
-Gerçek uykudaki Mac USB takılarak mutlaka uyanmaz. Bu davranışa bağımlılık yoktur.
-FileVault açılış kilidi, USB aksesuar izni veya eduroam yeniden kimlik doğrulaması
-kullanıcı etkileşimi gerektirebilir. İlk aksesuar onayını Mac açık ve kilidi açıkken verin;
-tüm aksesuarlara kalıcı izin vermek gerekli değildir.
+```bash
+git clone https://github.com/kaanunsel/mac-ethernet-share.git
+cd mac-ethernet-share
+networksetup -listallhardwareports
+cp Configuration.example.swift Configuration.local.swift
+```
 
-## Kurulum
+Edit `Configuration.local.swift`:
 
-macOS ve Xcode Command Line Tools (`xcrun swiftc`) gerektirir. Başka paket veya sürücü yüklemez.
+```swift
+enum Configuration {
+    static let ethernetMAC = "02:00:00:00:00:01" // Replace with your Ethernet adapter's MAC.
+    static let upstreamInterface = "en0"       // Replace with your Wi-Fi interface.
+}
+```
+
+Use the Ethernet adapter's hardware address on the **Mac**, not the client's address.
+The daemon resolves the adapter's current interface name by MAC address, so an
+interface number change does not require rebuilding. It does not require a specific
+USB vendor, product, or serial number. The local configuration is ignored by Git.
+The selected upstream must be the primary IPv4 interface; VPN routes that change
+that interface stop sharing. This project is intended for Wi-Fi-to-Ethernet use.
+
+Build, check, and install:
 
 ```bash
 bash tests/check.sh
-bash build.sh
+.build/ethernetshared check-config
 sudo bash install.sh
-./ps5-share.sh status
+./ethernet-share.sh status
+./ethernet-share.sh start
 ```
 
-İlk kurulum **duraklatılmış** başlar. Eski manuel oturumdan geçişi aşağıdaki gibi
-kontrol ettikten sonra otomasyonu etkinleştirin:
+A fresh installation starts paused for the current boot. `start` enables automatic
+sharing immediately. A reboot clears this pause, so the daemon can start sharing
+when the configured adapter is ready. The example configuration deliberately has
+no adapter address: builds and tests work, but installation refuses it until configured.
 
-```bash
-./ps5-share.sh start
-```
+Configure the Ethernet client manually:
 
-Kurulum, derlenmiş binary'yi root'a ait
-`/Library/PrivilegedHelperTools/local.ps5share/ps5shared` konumuna kopyalar;
-root servis çalışma sırasında bu Git klasöründeki dosyaları çalıştırmaz.
-Plist `/Library/LaunchDaemons/local.ps5share.plist` konumundadır.
-Güncelleme için yeniden build/install çalıştırılabilir; önceki duraklatma tercihi korunur.
-Installer eski pipe hatasından dolayı `SIGTERMed` durumda kalmış bilinen daemon komutunu
-tam yol ve argümanlarıyla doğrulayıp gerekirse sonlandırır; recovery güncel binary ile yapılır.
-Aynı binary, plist ve log yapılandırması zaten çalışan serviste kuruluysa installer hiçbir
-dosyayı veya servisi değiştirmeden başarılı çıkar. Gerçek bir güncellemede yeni dosyalar
-önce root'a ait staging dizininde doğrulanır. Kurulum/yeniden başlatma başarısız olursa
-önceki binary ve yapılandırma geri yüklenip eski servis yeniden başlatılır. Aktif paylaşım
-gerçek sürüm güncellemesi sırasında birkaç saniye kesilebilir ve koşullar hâlâ uygunsa
-kurulumun ardından otomatik yeniden başlar.
-
-`ps5share`, `ps5stop`, `ps5status` ve `ps5sharelogs` alias'ları bu klasördeki
-`ps5-share.sh` komutlarına gidebilir. `ps5sharelogs` canlı log takibini açar. Yeni `stop`, adaptör takılı kalsa da
-otomasyonu mevcut boot süresince duraklatır; `start` beklemeden tekrar etkinleştirir.
-Shutdown/restart sonrasında duraklatma otomatik kalkar ve servis tekrar adaptör bekler.
-Komutlar isteği daemon'a iletir; sonuç için status/log kontrol edilir.
-
-```bash
-./ps5-share.sh stop
-./ps5-share.sh start
-./ps5-share.sh status
-./ps5-share.sh logs
-```
-
-`logs`, `/var/log/ps5share.log` dosyasının son 100 satırını gösterir ve yeni olayları
-canlı takip eder; çıkmak için `Ctrl+C` kullanılır. Örnek olay sırası:
-
-```text
-2026-09-20T10:30:00+03:00 STATE adapter=connected(en9) ethernet=up power=AC wifi=ready lid=open automation=enabled
-2026-09-20T10:30:00+03:00 SHARING start-trigger reason=all-conditions-ready interface=en9
-2026-09-20T10:30:01+03:00 SHARING started interface=en9 client=192.168.2.2 power-policy=AC-or-battery
-2026-09-20T10:31:10+03:00 STATE adapter=connected(en9) ethernet=up power=AC wifi=ready lid=closed automation=enabled
-2026-09-20T10:35:00+03:00 STATE adapter=disconnected ethernet=down power=AC wifi=ready lid=closed automation=enabled
-2026-09-20T10:35:00+03:00 SHARING stop-trigger reason=adapter-removed
-2026-09-20T10:35:01+03:00 SHARING stopped settings-restored=true
-2026-09-20T10:35:01+03:00 SLEEP requested reason=lid-closed-after-sharing-stop
-```
-
-Adaptör, Ethernet, güç kaynağı ve ağ değişimleri olay bildirimiyle hızlıca görülür. Kapak durumu
-10 saniyelik uzlaştırma kontrolünde kaydedildiği için kapatma satırı en geç yaklaşık
-10 saniye sonra yazılabilir. Bu timer uyuyan Mac'i uyandırmaz. Log root'a ait `0600`
-izinlidir; komut bu yüzden `sudo` isteyebilir. `newsyslog`, dosya 1 MB'ı geçtiğinde
-7 sıkıştırılmış geçmiş kopya tutar; daemon her olayda dosyayı yeniden açtığı için
-paylaşımı kesmeden yeni dosyaya yazmaya devam eder.
-
-## Eski sürümden geçiş
-
-Eski script, commitlenmemiş güç ayarı notları dahil `legacy/ps5-share.sh.txt`
-dosyasında korunmuştur. **Yeni servisle birlikte çalıştırmayın.** Eski sürüm ana PF
-ruleset'ini değiştirdiğinden yeni servis Apple'ın `com.apple/*` NAT/filter bağlantılarını
-bulamayabilir. Bu durumda hata kaydeder ve paylaşımı başlatmaz; ana ruleset'i kendi başına yüklemez.
-
-Önce mevcut durumu okuyun:
-
-```bash
-pmset -g
-pmset -g custom
-sysctl net.inet.ip.forwarding
-sudo pfctl -sr
-sudo pfctl -sn
-sudo pfctl -s References
-```
-
-Eski scriptin `stop` komutu PF'yi sistem genelinde kapattığı için otomatik migration'da
-kullanılmaz. Eski `caffeinate` süreci varsa komut satırını doğrulayarak kapatın;
-`/tmp` içindeki eski PID dosyasına körü körüne güvenmeyin.
-
-Bu Mac'te eski script öncesi kaydedilmiş AC `sleep` değeri **1**, `SleepDisabled` **0** idi
-(2026-09-19 notu). Hâlâ istediğiniz başlangıç ayarları bunlarsa, paylaşım kapalıyken:
-
-```bash
-sudo pmset -c sleep 1
-sudo pmset disablesleep 0
-```
-
-Başka uygulama forwarding kullanmıyorsa eski oturumun `net.inet.ip.forwarding=1`
-değeri 0'a döndürülmelidir. Adaptörde eski `192.168.2.1` adresi varsa kaldırılmalıdır.
-Yeni daemon, başlangıçta forwarding zaten açıksa veya adaptörde link-local dışında bir
-IPv4 varsa devralmayı reddeder. Yeniden başlatma geçici PF/sysctl/arayüz durumunu
-temizlemek için bir seçenektir; `pmset` değişiklikleri yeniden başlatmada silinmez.
-
-PF bağlantıları eksikse `/etc/pf.conf` ve kullanılan diğer güvenlik/ağ yazılımları
-incelenerek normal ruleset kontrollü biçimde geri yüklenmelidir. Rutin başlangıç veya
-durdurma sırasında ana PF ruleset'ini yükleyen bir komut yoktur.
-
-## PS5 ayarları
-
-Kablolu LAN, manuel IPv4:
-
-| Ayar | Değer |
+| Setting | Value |
 | --- | --- |
-| IP | `192.168.2.2` |
-| Alt ağ maskesi | `255.255.255.0` |
+| IPv4 address | `192.168.2.2` |
+| Subnet mask | `255.255.255.0` |
 | Gateway | `192.168.2.1` |
-| DNS | `1.1.1.1`, `8.8.8.8` |
-| MTU / Proxy | Automatic / Do Not Use |
+| DNS servers | `1.1.1.1`, `8.8.8.8` (or your preferred reachable DNS servers) |
 
-IPv6 bu paylaşım arayüzünde filtrelenir. Bu işlem NAT ve IPv4 forwarding'dir;
-internetten PS5'e port açan `rdr`/port-forwarding kuralları eklenmez.
+The subnet and client address are currently fixed. No DHCP or IPv6 routing is
+provided. The Mac's downstream interface must have no non-link-local IPv4 address
+before sharing starts. An existing route for `192.168.2.0/24` prevents startup;
+use an upstream network that does not overlap this subnet. Broader overlapping
+routes are not comprehensively detected.
 
-## Güç ve ağ güvenliği
-
-- Yalnızca `com.apple/ps5share` anchor'ına kural yüklenir. Apple'ın mevcut wildcard
-  hook'ları kullanılır; sistem anchor'ları silinmez. Bu ad alanının kullanılabilirliği
-  her başlangıçta kontrol edilir ve macOS güncellemelerinden sonra yeniden test edilmelidir.
-- PF için `-E` referansı alınır ve yalnızca kendi `-X` token'ı bırakılır; `pfctl -d` yoktur.
-  Token çıktısı JSON journal'dan önce ayrı dosyaya yazılır. PF ve dosya sistemi tek
-  atomik transaction sunmadığından, tam token üretim anındaki zorla sonlandırmada
-  artık bir PF referansı kalması tamamen dışlanamaz. Referansları incelemek için
-  `sudo pfctl -s References` kullanılır; tüm PF'yi kapatmak kurtarma yöntemi değildir.
-- NAT yalnızca PS5'in `/32` adresine uygulanır. Adaptörden Mac'in kendi IP'lerine
-  erişim engellenir. Bu cihaz tanıma, kriptografik kimlik doğrulaması değildir.
-- Geçici gateway bir IP alias'ı olarak eklenir; durdururken yalnızca bu alias kaldırılır.
-- IPv4 forwarding global bir ayardır. Başlangıçta zaten açıksa servis başlatılmaz;
-  bu servis aktifken başka bir paylaşım/router servisi başlatılmamalıdır.
-- `sleep`, `displaysleep`, `hibernatemode`, `womp` değiştirilmez. Özellikle `sleep=0`
-  kalıcı olarak yazılmaz. Kapak kapalı çalışmak için kullanılan `disablesleep`
-  belgelenmemiş ve **sistem genelinde** bir ayardır. Paylaşım bataryada da çalıştığı için
-  adaptör takılı ve link aktif kaldığı sürece bu override korunur.
-- Durum root'a ait `0700` izinli `/var/db/ps5share` içinde JSON olarak saklanır;
-  shell ile `source` edilmez. Hata durumunda diğer temizleme adımları da denenir ve
-  başarısız journal yeniden denemek üzere korunur. Aynı anda ikinci daemon çalışamaz.
-- Servis yeniden açılana kadar `SleepDisabled` çökme sonrası kısa süre etkin kalabilir.
-  `launchd` yeniden başlatır; başka root yazılımlar veya servis kaldırılması kurtarmayı
-  engellerse aşağıdaki recovery komutu gerekir. Sıfır risk/garantili lid desteği iddiası yoktur.
-- Batarya kritik seviyede aniden kapanırsa journal diskte kalır. Sistem aynı boot'u
-  hibernation'dan sürdürürse adaptör yokken PF, forwarding ve uyku ayarı temizlenir.
-  Yeni bir boot oluşursa servis eski boot'un geçici PF/arayüz/sysctl durumuna dokunmaz;
-  yalnızca kalıcı `SleepDisabled` değerini geri yükler ve journal'ı temizler.
-- Kapağı kapalı Mac'i sert, havalanan bir yüzeyde kullanın; çantaya koymadan adaptörü çıkarın.
-- Başlatma ve temizliğin ürettiği ağ bildirimleri seri bir kapıdan geçirilir. İşlem sırasında
-  gelen birden fazla callback iç içe start/stop çalıştırmaz; bittikten sonra tek yeni
-  değerlendirme olarak birleştirilir.
-
-## Gözlem, test ve kaldırma
-
-Sistem ayarlarına dokunmadan olayları görmek için normal kullanıcıyla:
+## Everyday use
 
 ```bash
-.build/ps5shared observe
+./ethernet-share.sh start   # Enable automatic sharing
+./ethernet-share.sh stop    # Pause until start or the next reboot
+./ethernet-share.sh status  # Inspect adapter, upstream, power, pause, and PF state
+./ethernet-share.sh logs    # Follow the last 100 log lines; Ctrl+C to exit
 ```
 
-USB eklenme/çıkarılma için IOKit, ağ durumu için SystemConfiguration, AC değişimi için
-IOPowerSources bildirimleri kullanılır. Normal 10 saniyelik timer yalnızca Mac uyanıkken
-çalışır ve kaçırılan olayları/uyanmayı tekrar kontrol eder; RTC wake oluşturmaz.
+Sharing starts when the selected adapter is present, its Ethernet link is up, the
+configured upstream is primary and has a non-link-local IPv4 address, and automation
+is enabled. It stops when any of these conditions disappears. Power-source changes
+are logged; both AC and battery operation are supported.
 
-`bash tests/check.sh` şu kontrolleri çalıştırır:
+The daemon handles adapter/network/power notifications and reconciles every ten
+seconds while the Mac is awake. It works at the lock screen after the Mac has booted.
+A sleeping Mac is not guaranteed to wake on adapter insertion. FileVault unlock,
+USB accessory permission, or Wi-Fi authentication may require user interaction.
 
-- Swift derlemesi (uyarılar hata kabul edilir), shell ve plist doğrulaması.
-- 32 başlangıç koşulu kombinasyonu, token/arayüz doğrulaması ve JSON round-trip.
-- Gerçek sistem komutları çalıştıramayan test binary'sinde start/stop, tekrarlı stop,
-  beş başlangıç aşamasına enjekte edilen hata, cleanup hatası/yeniden deneme, kapalı/açık kapakta
-  uyku sıralaması, token kaydetme arası çökme, boot kapsamlı manuel duraklatma ve batarya
-  bitmesi sonrası adaptör çıkarılmış halde hibernation ve reboot kurtarması.
-- Üretilen PF kurallarının `pfctl -nf` ile yüklemeden sözdizimi kontrolü.
+## Power and network behavior
 
-Fiziksel kabul testi kurulumdan sonra yapılmalıdır; bu testler otomatik testlerin yerine geçmez:
+- While sharing, the daemon uses the undocumented, system-wide `pmset disablesleep`
+  setting to keep the Mac awake, including with the lid closed. It restores the
+  previous value on cleanup. Display sleep and other power settings are unchanged.
+  Battery sharing can drain the battery; keep the Mac on a ventilated surface and
+  disconnect the adapter before putting it in a bag.
+- Removing the adapter or losing connectivity restores settings. If the lid is
+  closed, the daemon then requests sleep. No wake timers are installed.
+- A persistent recovery journal records changes before they occur. Startup attempts
+  cleanup after a crash; failures retain the journal for retry. Across boots only
+  the persistent sleep setting is restored, not stale PF/interface state.
+- Rules live in `com.apple/ethernetshare`, using Apple's existing wildcard hooks.
+  The daemon never replaces the root PF ruleset or disables PF globally. It releases
+  only its own PF reference token. A crash at token acquisition can still leave an
+  orphaned reference; inspect `sudo pfctl -s References` if necessary.
+- NAT is limited to the client's `/32` address. Incoming traffic from that client to
+  the Mac itself is blocked; IPv6 on the downstream interface is blocked. An IP
+  address is not authentication. No inbound port forwarding is configured.
+- IPv4 forwarding is global. The daemon refuses to start if it is already enabled.
+  Do not run another router, Internet Sharing service, or this project's older
+  service at the same time. VPN coexistence is not supported.
 
-1. Kapak açık, AC bağlı: tak → internet; çıkar → anchor/IP/uyku durumu eski haline dönmeli.
-2. Kilit ekranında tak; eduroam hazırken kilidi açmadan PS5 internetini kontrol et.
-3. Mac uyurken tak, kapağı aç; yaklaşık 10 saniye ve ağın geri gelme süresi sonunda bağlanmalı.
-4. Aktifken kapağı kapat; PS5 trafiği sürmeli. Adaptörü çıkar; Mac uyumalı.
-5. Aktif ve kapak kapalıyken AC gücü çıkar; paylaşım bataryada sürmeli. Adaptörü çıkarınca
-   paylaşım temizlenip Mac uyumalı.
-6. Aktif oturumdayken bataryanın kritik seviyede kapanmasını simüle et/test et; Mac kapalıyken
-   adaptörü çıkar, güç bağlayıp aç ve `SleepDisabled` değerinin eski haline döndüğünü doğrula.
-7. Aktif oturumda daemon'ı yeniden başlat; temizlik ve yeniden aktivasyon logunu doğrula.
-8. Adaptörsüz yeniden başlat; normal idle/lid sleep davranışını kontrol et.
+## Updates and removal
 
-Kaldırmak için:
+For code updates with the **same configuration**:
 
 ```bash
+bash tests/check.sh
+sudo bash install.sh
+```
+
+Identical installations leave the running service uninterrupted. Real upgrades
+stage and validate new files, preserve the pause state, and attempt rollback if
+installation fails. Sharing can briefly disconnect during an upgrade.
+
+Before changing the adapter or upstream configuration, stop and uninstall the
+existing service so its compiled configuration can clean up its own session:
+
+```bash
+./ethernet-share.sh stop
 sudo bash uninstall.sh
+# Edit Configuration.local.swift, then build and install again.
 ```
 
-Önce servis durdurulur ve kurtarma çalıştırılır; kurtarma başarısızsa binary/journal silinmez.
-Başarılı kaldırmada da log ve durum dizini tanı için korunur. Servis duruyorken elle kurtarma:
+Uninstallation retains recovery state and logs. A retained state directory means a
+later installation preserves the existing pause state instead of treating it as a
+fresh installation. Installed paths are:
+
+| Purpose | Path |
+| --- | --- |
+| Daemon | `/Library/PrivilegedHelperTools/local.ethernetshare/ethernetshared` |
+| Launch daemon | `/Library/LaunchDaemons/local.ethernetshare.plist` |
+| Recovery journal | `/var/db/ethernetshare/` |
+| Logs | `/var/log/ethernetshare.log` |
+| Log rotation | `/etc/newsyslog.d/local.ethernetshare.conf` |
+
+The root service runs the installed binary, never source or scripts from the clone.
+State is root-only; logs have mode `0600` and rotate at 1 MB with seven compressed copies.
+
+## Troubleshooting and recovery
+
+Start with `./ethernet-share.sh status` and `./ethernet-share.sh logs`.
+The daemon fails closed when another network configuration owns forwarding, an
+IPv4 address, or the sleep override, or when required PF hooks are unavailable.
+Investigate the existing configuration instead of resetting system-wide settings.
+
+For manual recovery, stop the launch daemon before taking its exclusive lock:
 
 ```bash
-sudo /Library/PrivilegedHelperTools/local.ps5share/ps5shared recover
+sudo launchctl bootout system/local.ethernetshare
+sudo /Library/PrivilegedHelperTools/local.ethernetshare/ethernetshared recover
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.ethernetshare.plist
 ```
 
-`recover`, çalışan daemon varsa kilit nedeniyle reddedilir. `stop` aktif daemon içindir;
-`recover` yalnızca daemon çalışmıyorken yarım kalmış bir oturumu temizlemek içindir.
+If migrating from an earlier version with a different service name, stop and
+uninstall that version using its own checkout first. Do not run both versions.
+The original prototype and documentation remain available in Git history; they
+are not supported installation instructions for this version.
 
-## Apple kaynakları
+## Development and validation
 
-- [IOKit cihaz bildirimleri](https://developer.apple.com/documentation/iokit/1514362-ioserviceaddmatchingnotification)
-- [SystemConfiguration dynamic store](https://developer.apple.com/documentation/systemconfiguration/scdynamicstore-gb2)
-- [USB aksesuar izinleri](https://support.apple.com/en-ca/102282)
-- Yerel `man pfctl`, `man pmset`, `man caffeinate`, `man launchd.plist` ve `/etc/pf.conf` açıklamaları.
+```bash
+bash tests/check.sh
+.build/ethernetshared rules     # Print rules without installing them
+.build/ethernetshared observe   # Watch conditions without changing network/power settings
+```
+
+Checks compile Swift with warnings as errors, validate shell/plist/log formats,
+exercise the child-process helper, and test policy, recovery, partial-start failures,
+cleanup retries, event coalescing, pause expiry, and power-loss recovery using
+simulated system commands. PF syntax is parsed without loading rules.
+These tests do not install the service or change network/power settings.
+
+Hardware acceptance remains manual: verify client connectivity, unplug/replug,
+upstream loss, pause/resume, AC-to-battery transition, lid close/open, daemon restart,
+and reboot recovery on the intended Mac. Closed-lid behavior is not guaranteed.
+
+Contributions are welcome through issues and pull requests. Include your macOS
+version, adapter model, reproduction steps, and sanitized logs when reporting bugs.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

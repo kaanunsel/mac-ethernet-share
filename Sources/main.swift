@@ -4,27 +4,24 @@ import IOKit.ps
 import SystemConfiguration
 import Darwin
 
-// Deliberately pinned to this user's adapter. Rebuild to enroll a different one.
-let vendor = 0x0b95
-let product = 0x1790
-let serial = "0074EE11"
-let ethernetMAC = "9c:69:d3:74:ee:11"
-let wifi = "en0"
+// Build-time configuration is compiled into the root-owned installed binary.
+let ethernetMAC = Configuration.ethernetMAC.lowercased()
+let wifi = Configuration.upstreamInterface
 let gateway = "192.168.2.1"
-let consoleIP = "192.168.2.2"
-let anchor = "com.apple/ps5share"
+let clientIP = "192.168.2.2"
+let anchor = "com.apple/ethernetshare"
 #if TESTING
-let directory = NSTemporaryDirectory() + "ps5share-tests-" + UUID().uuidString
+let directory = NSTemporaryDirectory() + "ethernetshare-tests-" + UUID().uuidString
 var commandOverride: ((String, [String], String?) throws -> String)?
 var testLidClosed = false
 var testMatchingAdapter: String? = "en9"
 #else
-let directory = "/var/db/ps5share"
+let directory = "/var/db/ethernetshare"
 #endif
 let statePath = directory + "/state.json"
 let receiptPath = directory + "/pf-reference.txt"
 let pausedPath = directory + "/paused"
-let logPath = "/var/log/ps5share.log"
+let logPath = "/var/log/ethernetshare.log"
 let fm = FileManager.default
 
 struct Failure: Error, CustomStringConvertible {
@@ -137,7 +134,7 @@ func acquireLock() throws {
     try secureDirectory()
     lockFD = open(directory + "/lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
     guard lockFD >= 0, flock(lockFD, LOCK_EX | LOCK_NB) == 0 else {
-        throw Failure("Another ps5shared process is running. Stop the launch daemon before recovery.")
+        throw Failure("Another ethernetshared process is running. Stop the launch daemon before recovery.")
     }
 }
 
@@ -167,6 +164,16 @@ func loadState() throws -> Snapshot? {
         throw Failure("Invalid recovery state; refusing to change system settings.")
     }
     return state
+}
+
+func validateConfiguration(mac: String = ethernetMAC, upstream: String = wifi) throws {
+    let bytes = mac.split(separator: ":", omittingEmptySubsequences: false)
+    guard bytes.count == 6, bytes.allSatisfy({ $0.count == 2 && UInt8($0, radix: 16) != nil }),
+          mac != "00:00:00:00:00:00", mac != "ff:ff:ff:ff:ff:ff",
+          let first = UInt8(bytes[0], radix: 16), first & 1 == 0,
+          validInterface(upstream) else {
+        throw Failure("Configure a unicast Ethernet MAC address and upstream interface in Configuration.local.swift, then rebuild. See README.")
+    }
 }
 
 func validInterface(_ name: String) -> Bool {
@@ -201,36 +208,14 @@ func matchingAdapter() -> String? {
     #if TESTING
     return testMatchingAdapter
     #else
-    var iterator: io_iterator_t = 0
-    guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOEthernetInterface"), &iterator) == KERN_SUCCESS else { return nil }
-    defer { IOObjectRelease(iterator) }
-    while true {
-        let interface = IOIteratorNext(iterator)
-        if interface == 0 { break }
-        defer { IOObjectRelease(interface) }
-        guard let name = registryValue(interface, "BSD Name") as? String, validInterface(name) else { continue }
-        var parent = interface
-        IOObjectRetain(parent)
-        var matched = false
-        while parent != 0 {
-            if (registryValue(parent, "idVendor") as? Int) == vendor,
-               (registryValue(parent, "idProduct") as? Int) == product,
-               (registryValue(parent, "USB Serial Number") as? String) == serial {
-                matched = true
-            }
-            var next: io_registry_entry_t = 0
-            let result = IORegistryEntryGetParentEntry(parent, kIOServicePlane, &next)
-            IOObjectRelease(parent)
-            parent = result == KERN_SUCCESS ? next : 0
-        }
-        if matched,
-           let interfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface],
-           interfaces.contains(where: {
-               SCNetworkInterfaceGetBSDName($0) as String? == name &&
-               (SCNetworkInterfaceGetHardwareAddressString($0) as String?)?.lowercased() == ethernetMAC
-           }) { return name }
+    guard let interfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] else { return nil }
+    let matches = interfaces.filter {
+        SCNetworkInterfaceGetInterfaceType($0) == kSCNetworkInterfaceTypeEthernet &&
+        (SCNetworkInterfaceGetHardwareAddressString($0) as String?)?.lowercased() == ethernetMAC
     }
-    return nil
+    guard matches.count == 1, let name = SCNetworkInterfaceGetBSDName(matches[0]) as String?,
+          validInterface(name), name != wifi else { return nil }
+    return name
     #endif
 }
 
@@ -301,11 +286,11 @@ func pausedForCurrentBoot() -> Bool {
 
 func pfRules(_ interface: String) -> String {
     """
-    nat on \(wifi) inet from \(consoleIP)/32 to any -> (\(wifi))
-    block drop in quick on \(interface) inet from ! \(consoleIP) to any
+    nat on \(wifi) inet from \(clientIP)/32 to any -> (\(wifi))
+    block drop in quick on \(interface) inet from ! \(clientIP) to any
     block drop in quick on \(interface) inet from any to self
-    pass in quick on \(interface) inet from \(consoleIP) to any keep state
-    pass out quick on \(wifi) inet from \(consoleIP) to any keep state
+    pass in quick on \(interface) inet from \(clientIP) to any keep state
+    pass out quick on \(wifi) inet from \(clientIP) to any keep state
     block drop quick on \(interface) inet6 all
     """ + "\n"
 }
@@ -362,7 +347,7 @@ func start(_ interface: String) throws {
     // This is system-wide despite -c in the legacy script. It is restored when sharing stops.
     try run("/usr/bin/pmset", ["disablesleep", "1"])
     guard try disabledSleep() == 1 else { throw Failure("macOS did not accept the lid-sleep override.") }
-    log("SHARING started interface=\(interface) client=\(consoleIP) power-policy=AC-or-battery")
+    log("SHARING started interface=\(interface) client=\(clientIP) power-policy=AC-or-battery")
 }
 
 // Attempt every cleanup step even when one fails. Retain the journal for retries.
@@ -376,8 +361,8 @@ func cleanup(sleepAfter: Bool) throws {
     if sameBoot {
         if state.rules {
             attempt { try run("/sbin/pfctl", ["-a", anchor, "-f", "-"], input: "") }
-            // Do not flush the system state table. Kill only PS5-originated flows.
-            attempt { try run("/sbin/pfctl", ["-k", consoleIP]) }
+            // Do not flush the system state table. Kill only client device-originated flows.
+            attempt { try run("/sbin/pfctl", ["-k", clientIP]) }
         }
         if state.forwardingChanged {
             attempt { try run("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=\(state.forwarding)"]) }
@@ -466,7 +451,7 @@ func sessionHealthy(_ state: Snapshot, _ status: Conditions) throws -> Bool {
     let nat = try run("/sbin/pfctl", ["-a", anchor, "-sn"])
     let sleep = try disabledSleep()
     return address.contains("inet \(gateway) ") && forwarding.trimmingCharacters(in: .whitespacesAndNewlines) == "1" &&
-        nat.contains(consoleIP) && sleep == 1
+        nat.contains(clientIP) && sleep == 1
 }
 
 func reconcilePass() {
@@ -536,7 +521,7 @@ func watch() throws {
     // Drain to arm both notifications. Startup scan also handles already-connected devices.
     devicesChanged(nil, added)
     devicesChanged(nil, removed)
-    guard let store = SCDynamicStoreCreate(nil, "ps5share" as CFString, { _, _, _ in reconcile() }, nil),
+    guard let store = SCDynamicStoreCreate(nil, "ethernetshare" as CFString, { _, _, _ in reconcile() }, nil),
           SCDynamicStoreSetNotificationKeys(store, nil, ["State:/Network/.*"] as CFArray),
           let networkSource = SCDynamicStoreCreateRunLoopSource(nil, store, 0) else { throw Failure("Cannot watch network changes") }
     CFRunLoopAddSource(CFRunLoopGetMain(), networkSource, .defaultMode)
@@ -569,6 +554,16 @@ func watch() throws {
 
 func selfTest() throws {
     func check(_ value: Bool, _ message: String) throws { if !value { throw Failure(message) } }
+    try validateConfiguration(mac: "02:00:00:00:00:01", upstream: "en1")
+    for invalid in ["", "00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "01:00:00:00:00:01", "02:00:00:00:00:zz", "02:00:00:00:00:001"] {
+        var rejected = false
+        do { try validateConfiguration(mac: invalid, upstream: "en0") } catch { rejected = true }
+        try check(rejected, "Invalid adapter configuration must be rejected")
+    }
+    var rejectedUpstream = false
+    do { try validateConfiguration(mac: "02:00:00:00:00:01", upstream: "en0;shutdown") }
+    catch { rejectedUpstream = true }
+    try check(rejectedUpstream, "Invalid upstream configuration must be rejected")
     try check(parseToken("pf enabled\nToken : 123456789\n") == "123456789", "PF token parser")
     try check(parseToken("Token : not-a-token") == nil, "Reject invalid token")
     try check(validInterface("en9") && !validInterface("en9;shutdown") && !validInterface("en"), "Interface validation")
@@ -631,8 +626,8 @@ func recoveryTests() throws {
         case "/sbin/ifconfig en9": return ip ? "inet 192.168.2.1 netmask 0xffffff00" : "inet 169.254.1.2 netmask 0xffff0000"
         case "/sbin/ifconfig en9 inet 192.168.2.1 netmask 255.255.255.0 alias": ip = true
         case "/sbin/ifconfig en9 inet 192.168.2.1 -alias": ip = false
-        case "/sbin/pfctl -a com.apple/ps5share -nf -": break
-        case "/sbin/pfctl -a com.apple/ps5share -f -": rules = !(input ?? "").isEmpty
+        case "/sbin/pfctl -a com.apple/ethernetshare -nf -": break
+        case "/sbin/pfctl -a com.apple/ethernetshare -f -": rules = !(input ?? "").isEmpty
         case "/sbin/pfctl -E": token = true; return "Token : 123456\n"
         case "/sbin/pfctl -s References": return token ? "Token : 123456\n" : ""
         case "/sbin/pfctl -X 123456": token = false
@@ -654,7 +649,7 @@ func recoveryTests() throws {
     let count = calls.count
     try cleanup(sleepAfter: false)
     try assert(calls.count == count, "Repeated cleanup must be a no-op")
-    for failure in ["/sbin/ifconfig en9 inet 192.168.2.1 netmask 255.255.255.0 alias", "/sbin/pfctl -a com.apple/ps5share -f -", "/sbin/pfctl -E", "/usr/sbin/sysctl -w net.inet.ip.forwarding=1", "/usr/bin/pmset disablesleep 1"] {
+    for failure in ["/sbin/ifconfig en9 inet 192.168.2.1 netmask 255.255.255.0 alias", "/sbin/pfctl -a com.apple/ethernetshare -f -", "/sbin/pfctl -E", "/usr/sbin/sysctl -w net.inet.ip.forwarding=1", "/usr/bin/pmset disablesleep 1"] {
         fault = failure
         do { try start("en9"); throw Failure("Fault was not exercised") }
         catch { try assert(fault == nil, "Wrong failure in start") }
@@ -724,12 +719,13 @@ func recoveryTests() throws {
 do {
     let command = CommandLine.arguments.dropFirst().first ?? "status"
     switch command {
-    case "watch": try watch()
-    case "observe": observing = true; try watch()
+    case "check-config": try validateConfiguration(); print("Configuration is valid.")
+    case "watch": try validateConfiguration(); try watch()
+    case "observe": try validateConfiguration(); observing = true; try watch()
     case "self-test": try selfTest()
     case "process-test":
-        let output = try run("/usr/bin/printf", ["ps5share-process-ok"])
-        guard output == "ps5share-process-ok" else { throw Failure("Child process output/EOF test failed") }
+        let output = try run("/usr/bin/printf", ["ethernetshare-process-ok"])
+        guard output == "ethernetshare-process-ok" else { throw Failure("Child process output/EOF test failed") }
         print("Passed: child process output and EOF handling.")
     case "rules": print(pfRules("en9"), terminator: "")
     case "status":
@@ -745,10 +741,10 @@ do {
         try secureDirectory()
         if command == "stop" { try pauseForCurrentBoot() }
         else if fm.fileExists(atPath: pausedPath) { try fm.removeItem(atPath: pausedPath) }
-        try run("/bin/launchctl", ["kill", "SIGUSR1", "system/local.ps5share"])
+        try run("/bin/launchctl", ["kill", "SIGUSR1", "system/local.ethernetshare"])
         print(command == "stop" ? "Paused for this boot; daemon will clean up. Reboot or run start to resume automatic sharing." : "Automatic sharing resumed; waiting for adapter and Wi-Fi.")
     case "recover": try acquireLock(); try cleanup(sleepAfter: false)
-    default: throw Failure("Usage: ps5shared {watch|observe|status|start|stop|recover|self-test|process-test|rules}")
+    default: throw Failure("Usage: ethernetshared {check-config|watch|observe|status|start|stop|recover|self-test|process-test|rules}")
     }
 } catch {
     log("ERROR: \(error)")

@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
-binary=/Library/PrivilegedHelperTools/local.ps5share/ps5shared
+binary=/Library/PrivilegedHelperTools/local.ethernetshare/ethernetshared
 case "${1:-status}" in
   logs)
-    exec sudo /usr/bin/tail -n 100 -F /var/log/ps5share.log
+    exec sudo /usr/bin/tail -n 100 -F /var/log/ethernetshare.log
     ;;
   start|stop|status|recover) ;;
   *) echo "Usage: $0 {start|stop|status|logs|recover}" >&2; exit 1 ;;

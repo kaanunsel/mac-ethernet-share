@@ -1,1 +1,3 @@
 .build/
+Configuration.local.swift
+.DS_Store
