@@ -65,8 +65,8 @@ dosyayı veya servisi değiştirmeden başarılı çıkar. Gerçek bir güncelle
 gerçek sürüm güncellemesi sırasında birkaç saniye kesilebilir ve koşullar hâlâ uygunsa
 kurulumun ardından otomatik yeniden başlar.
 
-`ps5share` / `ps5stop` alias'ları zaten bu klasördeki `ps5-share.sh start/stop`
-komutlarına gidiyorsa değişiklik gerekmez. Yeni `stop`, adaptör takılı kalsa da
+`ps5share`, `ps5stop`, `ps5status` ve `ps5sharelogs` alias'ları bu klasördeki
+`ps5-share.sh` komutlarına gidebilir. `ps5sharelogs` canlı log takibini açar. Yeni `stop`, adaptör takılı kalsa da
 otomasyonu mevcut boot süresince duraklatır; `start` beklemeden tekrar etkinleştirir.
 Shutdown/restart sonrasında duraklatma otomatik kalkar ve servis tekrar adaptör bekler.
 Komutlar isteği daemon'a iletir; sonuç için status/log kontrol edilir.
