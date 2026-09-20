@@ -69,8 +69,29 @@ Komutlar isteği daemon'a iletir; sonuç için status/log kontrol edilir.
 ./ps5-share.sh stop
 ./ps5-share.sh start
 ./ps5-share.sh status
-sudo tail -f /var/log/ps5share.log
+./ps5-share.sh logs
 ```
+
+`logs`, `/var/log/ps5share.log` dosyasının son 100 satırını gösterir ve yeni olayları
+canlı takip eder; çıkmak için `Ctrl+C` kullanılır. Örnek olay sırası:
+
+```text
+2026-09-20T10:30:00+03:00 STATE adapter=connected(en9) ethernet=up power=AC wifi=ready lid=open automation=enabled
+2026-09-20T10:30:00+03:00 SHARING start-trigger reason=all-conditions-ready interface=en9
+2026-09-20T10:30:01+03:00 SHARING started interface=en9 client=192.168.2.2 power-policy=AC-only
+2026-09-20T10:31:10+03:00 STATE adapter=connected(en9) ethernet=up power=AC wifi=ready lid=closed automation=enabled
+2026-09-20T10:35:00+03:00 STATE adapter=disconnected ethernet=down power=AC wifi=ready lid=closed automation=enabled
+2026-09-20T10:35:00+03:00 SHARING stop-trigger reason=adapter-removed
+2026-09-20T10:35:01+03:00 SHARING stopped settings-restored=true
+2026-09-20T10:35:01+03:00 SLEEP requested reason=lid-closed-after-sharing-stop
+```
+
+Adaptör, Ethernet, AC ve ağ değişimleri olay bildirimiyle hızlıca görülür. Kapak durumu
+10 saniyelik uzlaştırma kontrolünde kaydedildiği için kapatma satırı en geç yaklaşık
+10 saniye sonra yazılabilir. Bu timer uyuyan Mac'i uyandırmaz. Log root'a ait `0600`
+izinlidir; komut bu yüzden `sudo` isteyebilir. `newsyslog`, dosya 1 MB'ı geçtiğinde
+7 sıkıştırılmış geçmiş kopya tutar; daemon her olayda dosyayı yeniden açtığı için
+paylaşımı kesmeden yeni dosyaya yazmaya devam eder.
 
 ## Eski sürümden geçiş
 

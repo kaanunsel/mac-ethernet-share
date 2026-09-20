@@ -8,5 +8,6 @@ fi
 # Preserve recovery state and installed binary if cleanup fails.
 if [[ -x "$destination/ps5shared" ]]; then "$destination/ps5shared" recover; fi
 /bin/rm -f /Library/LaunchDaemons/local.ps5share.plist "$destination/ps5shared"
+/bin/rm -f /etc/newsyslog.d/local.ps5share.conf
 if [[ -d "$destination" ]]; then /bin/rmdir "$destination"; fi
 echo "Service removed. Recovery directory and logs retained in /var/db/ps5share and /var/log/ps5share.log."

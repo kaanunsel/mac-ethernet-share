@@ -7,12 +7,14 @@ if [[ $EUID -ne 0 ]]; then
 fi
 [[ -x .build/ps5shared ]] || { echo "Run bash build.sh as your normal user first." >&2; exit 1; }
 /usr/bin/plutil -lint local.ps5share.plist
+/usr/sbin/newsyslog -n -f local.ps5share.newsyslog.conf >/dev/null
 .build/ps5shared self-test
 .build/ps5shared process-test
 destination=/Library/PrivilegedHelperTools/local.ps5share
 plist=/Library/LaunchDaemons/local.ps5share.plist
+newsyslog=/etc/newsyslog.d/local.ps5share.conf
 daemon="$destination/ps5shared"
-if [[ -L "$destination" || -L /var/db/ps5share || -L /var/log/ps5share.log || -L "$plist" ]]; then
+if [[ -L "$destination" || -L /var/db/ps5share || -L /var/log/ps5share.log || -L "$plist" || -L "$newsyslog" ]]; then
   echo "Refusing symlink installation/state/log target." >&2
   exit 1
 fi
@@ -47,6 +49,7 @@ fi
 # Use the validated new binary for recovery so upgrades can repair older releases.
 "$daemon" recover
 /usr/bin/install -o root -g wheel -m 644 local.ps5share.plist "$plist"
+/usr/bin/install -o root -g wheel -m 644 local.ps5share.newsyslog.conf "$newsyslog"
 # First installation starts paused. Observation and migration can be checked before activation.
 if [[ ! -d /var/db/ps5share ]]; then
   /usr/bin/install -d -o root -g wheel -m 700 /var/db/ps5share

@@ -23,6 +23,7 @@ let directory = "/var/db/ps5share"
 let statePath = directory + "/state.json"
 let receiptPath = directory + "/pf-reference.txt"
 let pausedPath = directory + "/paused"
+let logPath = "/var/log/ps5share.log"
 let fm = FileManager.default
 
 struct Failure: Error, CustomStringConvertible {
@@ -31,8 +32,23 @@ struct Failure: Error, CustomStringConvertible {
 }
 
 func log(_ message: String) {
-    print("\(ISO8601DateFormatter().string(from: Date())) \(message)")
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)"
+    print(line)
     fflush(stdout)
+    #if !TESTING
+    // Open per event so newsyslog rotation is picked up without restarting sharing.
+    if geteuid() == 0, let data = (line + "\n").data(using: .utf8) {
+        do {
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+            try handle.close()
+        } catch {
+            // Console output above remains available to launchd during early installation.
+        }
+    }
+    #endif
 }
 
 // No shell evaluation; arguments and stdin are always passed separately.
@@ -217,12 +233,13 @@ func matchingAdapter() -> String? {
     #endif
 }
 
-struct Conditions {
+struct Conditions: Equatable {
     var interface: String?
     var ac: Bool
     var link: Bool
     var upstream: Bool
     var paused: Bool
+    var lidClosed: Bool
     var ready: Bool { interface != nil && ac && link && upstream && !paused }
 }
 
@@ -233,7 +250,7 @@ func conditions() -> Conditions {
     return Conditions(interface: interface, ac: acPower(),
                       link: interface.flatMap { storeValue("State:/Network/Interface/\($0)/Link")?["Active"] as? Bool } == true,
                       upstream: primary == wifi && addresses.contains { !$0.hasPrefix("169.254.") },
-                      paused: pausedForCurrentBoot())
+                      paused: pausedForCurrentBoot(), lidClosed: lidClosed())
 }
 
 func disabledSleep() throws -> Int {
@@ -344,7 +361,7 @@ func start(_ interface: String) throws {
     // This is system-wide despite -c in the legacy script. AC gating is done by this daemon.
     try run("/usr/bin/pmset", ["disablesleep", "1"])
     guard try disabledSleep() == 1 else { throw Failure("macOS did not accept the lid-sleep override.") }
-    log("Sharing active on \(interface); AC only, lid may be closed.")
+    log("SHARING started interface=\(interface) client=\(consoleIP) power-policy=AC-only")
 }
 
 // Attempt every cleanup step even when one fails. Retain the journal for retries.
@@ -389,17 +406,35 @@ func cleanup(sleepAfter: Bool) throws {
     guard errors.isEmpty else { throw Failure("Cleanup incomplete; journal retained: " + errors.joined(separator: "; ")) }
     if fm.fileExists(atPath: receiptPath) { try fm.removeItem(atPath: receiptPath) }
     try fm.removeItem(atPath: statePath)
-    log("Sharing stopped; previous sleep and forwarding settings restored.")
+    log("SHARING stopped settings-restored=true")
     if sleepAfter && state.sleepDisabled == 0 && lidClosed() {
+        log("SLEEP requested reason=lid-closed-after-sharing-stop")
         try run("/usr/bin/pmset", ["sleepnow"])
     }
 }
 
 var observing = false
 var active = false
-var lastReport = ""
+var lastConditions: Conditions?
 var cooldown = Date.distantPast
 var watchingReady = false
+
+func stateDescription(_ status: Conditions) -> String {
+    "STATE adapter=\(status.interface.map { "connected(\($0))" } ?? "disconnected") " +
+        "ethernet=\(status.link ? "up" : "down") power=\(status.ac ? "AC" : "battery") " +
+        "wifi=\(status.upstream ? "ready" : "unavailable") lid=\(status.lidClosed ? "closed" : "open") " +
+        "automation=\(status.paused ? "paused" : "enabled")"
+}
+
+func stopReasons(_ status: Conditions) -> String {
+    var reasons: [String] = []
+    if status.interface == nil { reasons.append("adapter-removed") }
+    else if !status.link { reasons.append("ethernet-link-down") }
+    if !status.ac { reasons.append("AC-disconnected") }
+    if !status.upstream { reasons.append("wifi-unavailable") }
+    if status.paused { reasons.append("manual-pause") }
+    return reasons.isEmpty ? "session-drift" : reasons.joined(separator: ",")
+}
 
 func sessionHealthy(_ state: Snapshot, _ status: Conditions) throws -> Bool {
     guard status.interface == state.interface else { return false }
@@ -413,8 +448,10 @@ func sessionHealthy(_ state: Snapshot, _ status: Conditions) throws -> Bool {
 
 func reconcile() {
     let status = conditions()
-    let report = "adapter=\(status.interface ?? "absent") AC=\(status.ac) link=\(status.link) WiFi=\(status.upstream) paused=\(status.paused) ready=\(status.ready)"
-    if report != lastReport { log(report); lastReport = report }
+    if status != lastConditions {
+        log(stateDescription(status))
+        lastConditions = status
+    }
     if observing { return }
     do {
         var healthy = true
@@ -424,7 +461,8 @@ func reconcile() {
         }
         if active && (!status.ready || !healthy) {
             active = false
-            if !healthy { log("Session drift detected; cleaning up before retry."); cooldown = Date().addingTimeInterval(60) }
+            log("SHARING stop-trigger reason=\(healthy ? stopReasons(status) : "session-drift")")
+            if !healthy { cooldown = Date().addingTimeInterval(60) }
             try cleanup(sleepAfter: true)
         }
         if !active {
@@ -432,6 +470,7 @@ func reconcile() {
             if try loadState() != nil { try cleanup(sleepAfter: !status.ready) }
             if status.ready, Date() >= cooldown, let interface = status.interface {
                 do {
+                    log("SHARING start-trigger reason=all-conditions-ready interface=\(interface)")
                     try start(interface)
                     active = true
                 } catch {
@@ -496,6 +535,7 @@ func watch() throws {
         signalSources.append(source)
     }
     watchingReady = true
+    log("DAEMON ready pid=\(getpid()) poll-interval=10s")
     reconcile()
     withExtendedLifetime((port, store, timer, signalSources)) { CFRunLoopRun() }
 }
@@ -507,7 +547,8 @@ func selfTest() throws {
     try check(validInterface("en9") && !validInterface("en9;shutdown") && !validInterface("en"), "Interface validation")
     for mask in 0..<32 {
         let c = Conditions(interface: mask & 1 != 0 ? "en9" : nil, ac: mask & 2 != 0,
-                           link: mask & 4 != 0, upstream: mask & 8 != 0, paused: mask & 16 != 0)
+                           link: mask & 4 != 0, upstream: mask & 8 != 0,
+                           paused: mask & 16 != 0, lidClosed: false)
         try check(c.ready == (mask == 15), "Start policy truth table \(mask)")
     }
     let original = Snapshot(interface: "en9", boot: "example", forwarding: 0, sleepDisabled: 0, sleepChanged: true)
@@ -515,6 +556,9 @@ func selfTest() throws {
     try check(restored.sleepChanged && restored.interface == "en9", "Recovery journal round trip")
     let rules = pfRules("en9")
     try check(!rules.contains("pass quick on en0 all") && rules.contains("192.168.2.2/32"), "Narrow PF policy")
+    let closed = Conditions(interface: "en9", ac: true, link: true, upstream: true, paused: false, lidClosed: true)
+    try check(stateDescription(closed).contains("lid=closed"), "Lid state logging")
+    try check(stopReasons(Conditions(interface: nil, ac: true, link: false, upstream: true, paused: false, lidClosed: true)) == "adapter-removed", "Adapter removal reason")
     print("Passed: 32 policy combinations, token parsing, interface validation, journal round trip, PF scope.")
     #if TESTING
     try recoveryTests()
@@ -632,7 +676,7 @@ do {
     case "rules": print(pfRules("en9"), terminator: "")
     case "status":
         let c = conditions()
-        print("Adapter: \(c.interface ?? "absent"), AC: \(c.ac), link: \(c.link), Wi-Fi upstream: \(c.upstream)")
+        print("Adapter: \(c.interface ?? "absent"), AC: \(c.ac), link: \(c.link), Wi-Fi upstream: \(c.upstream), lid closed: \(c.lidClosed)")
         if geteuid() == 0 {
             try secureDirectory()
             print("Paused: \(c.paused), recovery/session state: \(try loadState() != nil)")
