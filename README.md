@@ -8,6 +8,19 @@ selected Ethernet adapter and upstream connection are ready.
 No third-party runtime, DHCP server, or device-specific software is required.
 Sharing supports **one client IPv4 address at a time**.
 
+## Why this project exists
+
+This project began in a university dorm room. My PS5 could not connect directly
+to the eduroam network, so I used my MacBook as a bridge between Wi-Fi and a USB
+Ethernet adapter. I wanted the connection to become available automatically as
+soon as I plugged in the adapter, without repeating a series of network and power
+commands every time.
+
+The original setup was built for that PS5, but the same problem applies to many
+devices that cannot join an enterprise Wi-Fi network. The project is now generic:
+it can share a Mac's Wi-Fi connection with any Ethernet client that supports the
+documented static IPv4 configuration.
+
 ## Requirements
 
 - macOS with Xcode Command Line Tools (`xcode-select --install`).
