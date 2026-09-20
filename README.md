@@ -129,6 +129,10 @@ USB accessory permission, or Wi-Fi authentication may require user interaction.
 - IPv4 forwarding is global. The daemon refuses to start if it is already enabled.
   Do not run another router, Internet Sharing service, or this project's older
   service at the same time. VPN coexistence is not supported.
+- Cleanup reads IPv4 forwarding again after all other network teardown actions. If
+  the first restoration raced with a network event, it writes the original value
+  once more. It does not delete the recovery journal or log `settings-restored=true`
+  until the restored value has been verified.
 
 ## Updates and removal
 

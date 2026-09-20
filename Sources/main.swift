@@ -248,6 +248,15 @@ func disabledSleep() throws -> Int {
     throw Failure("Cannot read SleepDisabled; refusing to guess the original value.")
 }
 
+func forwardingValue() throws -> Int {
+    let text = try run("/usr/sbin/sysctl", ["-n", "net.inet.ip.forwarding"])
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let value = Int(text), [0, 1].contains(value) else {
+        throw Failure("Cannot read IPv4 forwarding state; refusing to guess its value.")
+    }
+    return value
+}
+
 func bootID() throws -> String {
     try run("/usr/sbin/sysctl", ["-n", "kern.boottime"]).trimmingCharacters(in: .whitespacesAndNewlines)
 }
@@ -315,7 +324,7 @@ func checkAnchors() throws {
 
 func start(_ interface: String) throws {
     try checkAnchors()
-    let forwarding = Int(try run("/usr/sbin/sysctl", ["-n", "net.inet.ip.forwarding"]).trimmingCharacters(in: .whitespacesAndNewlines))
+    let forwarding = try forwardingValue()
     guard forwarding == 0 else { throw Failure("IPv4 forwarding already enabled; another sharing service or legacy session may own it.") }
     let disabled = try disabledSleep()
     guard disabled == 0 else { throw Failure("SleepDisabled already enabled; restore the legacy session before enabling automatic sharing.") }
@@ -387,6 +396,19 @@ func cleanup(sleepAfter: Bool) throws {
         attempt {
             try run("/usr/bin/pmset", ["disablesleep", String(state.sleepDisabled)])
             guard try disabledSleep() == state.sleepDisabled else { throw Failure("SleepDisabled restoration did not take effect") }
+        }
+    }
+    // A network teardown callback can race with the first write. Verify after every
+    // other cleanup action and retry once before claiming that settings were restored.
+    if sameBoot, state.forwardingChanged {
+        attempt {
+            if try forwardingValue() != state.forwarding {
+                log("CLEANUP retry setting=net.inet.ip.forwarding expected=\(state.forwarding)")
+                try run("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=\(state.forwarding)"])
+            }
+            guard try forwardingValue() == state.forwarding else {
+                throw Failure("IPv4 forwarding restoration did not take effect")
+            }
         }
     }
     guard errors.isEmpty else { throw Failure("Cleanup incomplete; journal retained: " + errors.joined(separator: "; ")) }
@@ -611,6 +633,7 @@ func recoveryTests() throws {
     var ip = false
     var rules = false
     var token = false
+    var ignoredForwardRestores = 0
     var currentBoot = "boot-one"
     commandOverride = { path, args, input in
         let call = path + " " + args.joined(separator: " ")
@@ -633,7 +656,8 @@ func recoveryTests() throws {
         case "/sbin/pfctl -X 123456": token = false
         case "/sbin/pfctl -k 192.168.2.2": break
         case "/usr/sbin/sysctl -w net.inet.ip.forwarding=1": forward = 1
-        case "/usr/sbin/sysctl -w net.inet.ip.forwarding=0": forward = 0
+        case "/usr/sbin/sysctl -w net.inet.ip.forwarding=0":
+            if ignoredForwardRestores > 0 { ignoredForwardRestores -= 1 } else { forward = 0 }
         case "/usr/bin/pmset disablesleep 1": sleep = 1
         case "/usr/bin/pmset disablesleep 0": sleep = 0
         case "/usr/bin/pmset sleepnow": break
@@ -646,6 +670,17 @@ func recoveryTests() throws {
     try assert(ip && rules && token && forward == 1 && sleep == 1, "Start did not configure sharing")
     try cleanup(sleepAfter: false)
     try assert(!ip && !rules && !token && forward == 0 && sleep == 0, "Normal cleanup failed")
+    try start("en9")
+    ignoredForwardRestores = 1
+    try cleanup(sleepAfter: false)
+    try assert(forward == 0 && !fm.fileExists(atPath: statePath), "Late forwarding verification/retry failed")
+    try start("en9")
+    ignoredForwardRestores = 2
+    do { try cleanup(sleepAfter: false); throw Failure("Missing persistent forwarding restoration failure") }
+    catch { try assert(ignoredForwardRestores == 0, "Forwarding verification failure was not exercised") }
+    try assert(forward == 1 && fm.fileExists(atPath: statePath), "Unverified forwarding cleanup must retain its journal")
+    try cleanup(sleepAfter: false)
+    try assert(forward == 0 && !fm.fileExists(atPath: statePath), "Forwarding cleanup retry did not recover")
     let count = calls.count
     try cleanup(sleepAfter: false)
     try assert(calls.count == count, "Repeated cleanup must be a no-op")
