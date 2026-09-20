@@ -419,6 +419,29 @@ var lastConditions: Conditions?
 var cooldown = Date.distantPast
 var watchingReady = false
 
+// Process.waitUntilExit can service the main run loop. Network changes produced by
+// start/cleanup may therefore call reconcile again before the current pass returns.
+// Coalesce those callbacks into one subsequent pass instead of nesting mutations.
+final class SerialCoalescer {
+    private var running = false
+    private var pending = false
+
+    func perform(_ operation: () -> Void) {
+        if running {
+            pending = true
+            return
+        }
+        running = true
+        repeat {
+            pending = false
+            operation()
+        } while pending
+        running = false
+    }
+}
+
+let reconcileGate = SerialCoalescer()
+
 func stateDescription(_ status: Conditions) -> String {
     "STATE adapter=\(status.interface.map { "connected(\($0))" } ?? "disconnected") " +
         "ethernet=\(status.link ? "up" : "down") power=\(status.ac ? "AC" : "battery") " +
@@ -446,7 +469,7 @@ func sessionHealthy(_ state: Snapshot, _ status: Conditions) throws -> Bool {
         nat.contains(consoleIP) && sleep == 1
 }
 
-func reconcile() {
+func reconcilePass() {
     let status = conditions()
     if status != lastConditions {
         log(stateDescription(status))
@@ -481,6 +504,10 @@ func reconcile() {
             }
         }
     } catch { log("ERROR: \(error)") }
+}
+
+func reconcile() {
+    reconcileGate.perform(reconcilePass)
 }
 
 // All callbacks and actions run on the main run loop: no concurrent start/stop.
@@ -559,6 +586,16 @@ func selfTest() throws {
     let closed = Conditions(interface: "en9", ac: true, link: true, upstream: true, paused: false, lidClosed: true)
     try check(stateDescription(closed).contains("lid=closed"), "Lid state logging")
     try check(stopReasons(Conditions(interface: nil, ac: true, link: false, upstream: true, paused: false, lidClosed: true)) == "adapter-removed", "Adapter removal reason")
+    let gate = SerialCoalescer()
+    var reconciliationPasses = 0
+    gate.perform {
+        reconciliationPasses += 1
+        if reconciliationPasses == 1 {
+            gate.perform { reconciliationPasses += 100 }
+            gate.perform { reconciliationPasses += 100 }
+        }
+    }
+    try check(reconciliationPasses == 2, "Reentrant reconciliation must coalesce into one later pass")
     print("Passed: 32 policy combinations, token parsing, interface validation, journal round trip, PF scope.")
     #if TESTING
     try recoveryTests()

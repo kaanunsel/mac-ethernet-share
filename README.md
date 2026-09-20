@@ -179,6 +179,9 @@ internetten PS5'e port açan `rdr`/port-forwarding kuralları eklenmez.
   `launchd` yeniden başlatır; başka root yazılımlar veya servis kaldırılması kurtarmayı
   engellerse aşağıdaki recovery komutu gerekir. Sıfır risk/garantili lid desteği iddiası yoktur.
 - Kapağı kapalı Mac'i sert, havalanan bir yüzeyde kullanın; çantaya koymadan adaptörü çıkarın.
+- Başlatma ve temizliğin ürettiği ağ bildirimleri seri bir kapıdan geçirilir. İşlem sırasında
+  gelen birden fazla callback iç içe start/stop çalıştırmaz; bittikten sonra tek yeni
+  değerlendirme olarak birleştirilir.
 
 ## Gözlem, test ve kaldırma
 
