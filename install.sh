@@ -24,6 +24,32 @@ if [[ -L "$destination" || -L "$state_directory" || -L "$log_file" || -L "$plist
   exit 1
 fi
 
+# Remove only our verified, inactive staging directories left by an interrupted install.
+shopt -s nullglob
+for stale_stage in "$destination"/.install.*; do
+  [[ -d "$stale_stage" && ! -L "$stale_stage" ]] || { echo "Unsafe staging path: $stale_stage" >&2; exit 1; }
+  [[ $(/usr/bin/stat -f '%u:%Lp' "$stale_stage") == "0:700" ]] || {
+    echo "Refusing staging directory with unexpected owner/mode: $stale_stage" >&2
+    exit 1
+  }
+  if [[ -f "$stale_stage/installer-pid" ]]; then
+    staged_pid=$(<"$stale_stage/installer-pid")
+    if [[ "$staged_pid" =~ ^[0-9]+$ ]] && /bin/kill -0 "$staged_pid" 2>/dev/null; then
+      echo "Another installer is running (pid $staged_pid)." >&2
+      exit 1
+    fi
+  fi
+  for staged_file in new-daemon new-plist new-newsyslog old-daemon old-plist old-newsyslog installer-pid; do
+    [[ -f "$stale_stage/$staged_file" && ! -L "$stale_stage/$staged_file" ]] && /bin/unlink "$stale_stage/$staged_file"
+  done
+  if /usr/bin/find "$stale_stage" -mindepth 1 -maxdepth 1 -print -quit | /usr/bin/grep -q .; then
+    echo "Refusing staging directory with unexpected contents: $stale_stage" >&2
+    exit 1
+  fi
+  /bin/rmdir "$stale_stage"
+  echo "Cleaned interrupted installation staging: $stale_stage"
+done
+
 # Re-running an identical installation must not interrupt an active PS5 session.
 if [[ -x "$daemon" && -f "$plist" && -f "$newsyslog" ]] &&
    /usr/bin/cmp -s .build/ps5shared "$daemon" &&
@@ -42,6 +68,7 @@ was_loaded=0
 /usr/bin/install -d -o root -g wheel -m 755 "$destination"
 stage=$(/usr/bin/mktemp -d "$destination/.install.XXXXXX")
 /bin/chmod 700 "$stage"
+/usr/bin/printf '%s\n' "$$" > "$stage/installer-pid"
 /usr/bin/install -o root -g wheel -m 755 .build/ps5shared "$stage/new-daemon"
 /usr/bin/install -o root -g wheel -m 644 local.ps5share.plist "$stage/new-plist"
 /usr/bin/install -o root -g wheel -m 644 local.ps5share.newsyslog.conf "$stage/new-newsyslog"
@@ -61,15 +88,15 @@ finish_install() {
   if [[ $result -ne 0 && $rollback_needed -eq 1 ]]; then
     echo "Installation failed; restoring the previous service files..." >&2
     /bin/launchctl bootout system/local.ps5share >/dev/null 2>&1
-    if [[ $had_daemon -eq 1 ]]; then /usr/bin/install -o root -g wheel -m 755 "$stage/old-daemon" "$daemon"; else /usr/bin/unlink "$daemon" 2>/dev/null; fi
-    if [[ $had_plist -eq 1 ]]; then /usr/bin/install -o root -g wheel -m 644 "$stage/old-plist" "$plist"; else /usr/bin/unlink "$plist" 2>/dev/null; fi
-    if [[ $had_newsyslog -eq 1 ]]; then /usr/bin/install -o root -g wheel -m 644 "$stage/old-newsyslog" "$newsyslog"; else /usr/bin/unlink "$newsyslog" 2>/dev/null; fi
+    if [[ $had_daemon -eq 1 ]]; then /usr/bin/install -o root -g wheel -m 755 "$stage/old-daemon" "$daemon"; else /bin/unlink "$daemon" 2>/dev/null; fi
+    if [[ $had_plist -eq 1 ]]; then /usr/bin/install -o root -g wheel -m 644 "$stage/old-plist" "$plist"; else /bin/unlink "$plist" 2>/dev/null; fi
+    if [[ $had_newsyslog -eq 1 ]]; then /usr/bin/install -o root -g wheel -m 644 "$stage/old-newsyslog" "$newsyslog"; else /bin/unlink "$newsyslog" 2>/dev/null; fi
     if [[ $was_loaded -eq 1 && $had_daemon -eq 1 && $had_plist -eq 1 ]]; then
       /bin/launchctl bootstrap system "$plist" >/dev/null 2>&1
     fi
   fi
-  for staged_file in new-daemon new-plist new-newsyslog old-daemon old-plist old-newsyslog; do
-    [[ -e "$stage/$staged_file" ]] && /usr/bin/unlink "$stage/$staged_file"
+  for staged_file in new-daemon new-plist new-newsyslog old-daemon old-plist old-newsyslog installer-pid; do
+    [[ -e "$stage/$staged_file" ]] && /bin/unlink "$stage/$staged_file"
   done
   /bin/rmdir "$stage" 2>/dev/null
   trap - EXIT
