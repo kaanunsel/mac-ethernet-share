@@ -56,6 +56,8 @@ Kurulum, derlenmiş binary'yi root'a ait
 root servis çalışma sırasında bu Git klasöründeki dosyaları çalıştırmaz.
 Plist `/Library/LaunchDaemons/local.ps5share.plist` konumundadır.
 Güncelleme için yeniden build/install çalıştırılabilir; önceki duraklatma tercihi korunur.
+Installer eski pipe hatasından dolayı `SIGTERMed` durumda kalmış bilinen daemon komutunu
+tam yol ve argümanlarıyla doğrulayıp gerekirse sonlandırır; recovery güncel binary ile yapılır.
 
 `ps5share` / `ps5stop` alias'ları zaten bu klasördeki `ps5-share.sh start/stop`
 komutlarına gidiyorsa değişiklik gerekmez. Yeni `stop`, adaptör takılı kalsa da
