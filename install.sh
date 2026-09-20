@@ -25,7 +25,9 @@ if [[ -x "$destination/ps5shared" ]]; then "$destination/ps5shared" recover; fi
 # First installation starts paused. Observation and migration can be checked before activation.
 if [[ ! -d /var/db/ps5share ]]; then
   /usr/bin/install -d -o root -g wheel -m 700 /var/db/ps5share
-  /usr/bin/install -o root -g wheel -m 600 /dev/null /var/db/ps5share/paused
+  /usr/sbin/sysctl -n kern.boottime > /var/db/ps5share/paused
+  /usr/sbin/chown root:wheel /var/db/ps5share/paused
+  /bin/chmod 600 /var/db/ps5share/paused
 fi
 /usr/bin/touch /var/log/ps5share.log
 /usr/sbin/chown root:wheel /var/log/ps5share.log

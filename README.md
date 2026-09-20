@@ -26,6 +26,7 @@ değiştirdiği durumlarda paylaşım kapanır; eşzamanlı VPN/Internet Sharing
 | Adaptör, Ethernet link'i, AC güç veya Wi-Fi çıkışı kayboluyor | Paylaşım temizlenir; kapak kapalıysa ardından uyku istenir |
 | Adaptör yok | Uyku ayarlarına dokunulmaz; uyanma zamanlayıcısı kurulmaz |
 | Servis çöküyor veya yeniden başlatılıyor | Kalıcı journal okunur, eski oturum temizlenir, koşullar yeniden değerlendirilir |
+| Mac kapatılıp yeniden açılıyor | Sistem daemon'ı boot sırasında yeniden yüklenir; adaptör sonradan takıldığında otomasyon çalışır |
 
 Gerçek uykudaki Mac USB takılarak mutlaka uyanmaz. Bu davranışa bağımlılık yoktur.
 FileVault açılış kilidi, USB aksesuar izni veya eduroam yeniden kimlik doğrulaması
@@ -58,8 +59,9 @@ Güncelleme için yeniden build/install çalıştırılabilir; önceki duraklatm
 
 `ps5share` / `ps5stop` alias'ları zaten bu klasördeki `ps5-share.sh start/stop`
 komutlarına gidiyorsa değişiklik gerekmez. Yeni `stop`, adaptör takılı kalsa da
-otomasyonu duraklatır; `start` tekrar etkinleştirir. Komutlar isteği daemon'a iletir;
-sonuç için status/log kontrol edilir.
+otomasyonu mevcut boot süresince duraklatır; `start` beklemeden tekrar etkinleştirir.
+Shutdown/restart sonrasında duraklatma otomatik kalkar ve servis tekrar adaptör bekler.
+Komutlar isteği daemon'a iletir; sonuç için status/log kontrol edilir.
 
 ```bash
 ./ps5-share.sh stop
@@ -167,7 +169,7 @@ IOPowerSources bildirimleri kullanılır. Normal 10 saniyelik timer yalnızca Ma
 - 32 başlangıç koşulu kombinasyonu, token/arayüz doğrulaması ve JSON round-trip.
 - Gerçek sistem komutları çalıştıramayan test binary'sinde start/stop, tekrarlı stop,
   beş başlangıç aşamasına enjekte edilen hata, cleanup hatası/yeniden deneme, kapalı/açık kapakta
-  uyku sıralaması, token kaydetme arası çökme ve reboot kurtarması.
+  uyku sıralaması, token kaydetme arası çökme, boot kapsamlı manuel duraklatma ve reboot kurtarması.
 - Üretilen PF kurallarının `pfctl -nf` ile yüklemeden sözdizimi kontrolü.
 
 Fiziksel kabul testi kurulumdan sonra yapılmalıdır; bu testler otomatik testlerin yerine geçmez:

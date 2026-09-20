@@ -225,7 +225,7 @@ func conditions() -> Conditions {
     return Conditions(interface: interface, ac: acPower(),
                       link: interface.flatMap { storeValue("State:/Network/Interface/\($0)/Link")?["Active"] as? Bool } == true,
                       upstream: primary == wifi && addresses.contains { !$0.hasPrefix("169.254.") },
-                      paused: fm.fileExists(atPath: pausedPath))
+                      paused: pausedForCurrentBoot())
 }
 
 func disabledSleep() throws -> Int {
@@ -239,6 +239,38 @@ func disabledSleep() throws -> Int {
 
 func bootID() throws -> String {
     try run("/usr/sbin/sysctl", ["-n", "kern.boottime"]).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func pauseForCurrentBoot() throws {
+    guard let data = (try bootID() + "\n").data(using: .utf8) else {
+        throw Failure("Cannot encode the current boot identifier.")
+    }
+    try data.write(to: URL(fileURLWithPath: pausedPath), options: .atomic)
+    try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pausedPath)
+}
+
+func pausedForCurrentBoot() -> Bool {
+    guard fm.fileExists(atPath: pausedPath) else { return false }
+    guard let current = try? bootID(),
+          let data = try? Data(contentsOf: URL(fileURLWithPath: pausedPath)),
+          let marker = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+        // A failure to validate pause state must fail closed for this evaluation.
+        return true
+    }
+    if marker == current { return true }
+    if marker.isEmpty {
+        // Migrate the old persistent marker: honor it for this boot only.
+        try? pauseForCurrentBoot()
+        return true
+    }
+    do {
+        try fm.removeItem(atPath: pausedPath)
+        log("Expired manual pause from an earlier boot; automatic sharing enabled.")
+        return false
+    } catch {
+        log("ERROR: Cannot remove expired pause marker: \(error)")
+        return true
+    }
 }
 
 func pfRules(_ interface: String) -> String {
@@ -568,7 +600,14 @@ func recoveryTests() throws {
     try assert(sleep == 0, "Reboot recovery did not restore sleep")
     try assert(!calls.dropFirst(rebootCount).contains { $0.contains("pfctl") || $0.contains("ifconfig") || $0.contains("-w net.inet") }, "Reboot recovery touched new boot network state")
     try assert(!calls.contains { $0 == "/sbin/pfctl -d" || $0.hasPrefix("/sbin/pfctl -f") }, "Global PF mutation")
-    print("Passed: start/stop, idempotence, 5 partial-start failures, cleanup retry, closed/open lid, token receipt and reboot recovery.")
+    try pauseForCurrentBoot()
+    try assert(pausedForCurrentBoot(), "Manual pause must apply during the current boot")
+    currentBoot = "boot-three"
+    try assert(!pausedForCurrentBoot() && !fm.fileExists(atPath: pausedPath), "Manual pause must expire after reboot")
+    try Data().write(to: URL(fileURLWithPath: pausedPath))
+    try assert(pausedForCurrentBoot(), "Legacy empty pause marker must be honored during migration")
+    try assert((try String(contentsOfFile: pausedPath, encoding: .utf8)).contains("boot-three"), "Legacy pause marker was not migrated")
+    print("Passed: start/stop, idempotence, 5 partial-start failures, cleanup retry, closed/open lid, token receipt, boot-scoped pause and reboot recovery.")
 }
 #endif
 
@@ -590,10 +629,10 @@ do {
         } else { print("Use sudo for session, pause and PF status.") }
     case "start", "stop":
         try secureDirectory()
-        if command == "stop" { try Data().write(to: URL(fileURLWithPath: pausedPath), options: .atomic) }
+        if command == "stop" { try pauseForCurrentBoot() }
         else if fm.fileExists(atPath: pausedPath) { try fm.removeItem(atPath: pausedPath) }
         try run("/bin/launchctl", ["kill", "SIGUSR1", "system/local.ps5share"])
-        print(command == "stop" ? "Pause requested; daemon will clean up. Run start to resume automatic sharing." : "Automatic sharing resumed; waiting for adapter, AC and Wi-Fi.")
+        print(command == "stop" ? "Paused for this boot; daemon will clean up. Reboot or run start to resume automatic sharing." : "Automatic sharing resumed; waiting for adapter, AC and Wi-Fi.")
     case "recover": try acquireLock(); try cleanup(sleepAfter: false)
     default: throw Failure("Usage: ps5shared {watch|observe|status|start|stop|recover|self-test|rules}")
     }
