@@ -10,9 +10,11 @@ Paylaşım yalnızca şu koşullar birlikte sağlanınca başlar:
 
 - ASIX `0x0b95:0x1790`, seri `0074EE11`, MAC `9c:69:d3:74:ee:11` adaptörü takılıdır.
 - Ethernet link'i aktiftir; PS5/kablo bağlıdır.
-- Mac AC güçtedir.
 - Birincil IPv4 çıkışı `en0` Wi-Fi'dır ve link-local olmayan bir IPv4 adresi vardır.
 - Otomasyon manuel olarak duraklatılmamıştır.
+
+Mac AC gücünde veya bataryada olabilir. Güç kaynağı durum için izlenip loglanır ancak
+paylaşımı başlatma ya da durdurma koşulu değildir.
 
 `en9` sabitlenmez; arayüz kimlik üzerinden bulunur. Wi-Fi SSID kontrolü yapılmaz:
 eduroam dışındaki bir Wi-Fi ağı da koşulları sağlayabilir. VPN'in birincil arayüzü
@@ -22,8 +24,9 @@ değiştirdiği durumlarda paylaşım kapanır; eşzamanlı VPN/Internet Sharing
 | --- | --- |
 | Mac uyanık veya kilit ekranında, adaptör takılıyor | Koşullar sağlanınca otomatik başlar |
 | Adaptör Mac uyurken takılıyor, sonra kapak açılıyor | Uyanınca mevcut cihazlar yeniden taranır; en geç yaklaşık 10 saniye içinde değerlendirilir |
-| Paylaşım aktifken, AC güçte kapak kapanıyor | Geçici `SleepDisabled` ayarıyla paylaşım sürdürülür |
-| Adaptör, Ethernet link'i, AC güç veya Wi-Fi çıkışı kayboluyor | Paylaşım temizlenir; kapak kapalıysa ardından uyku istenir |
+| Paylaşım aktifken kapak kapanıyor | AC veya bataryada geçici `SleepDisabled` ayarıyla paylaşım sürdürülür |
+| Adaptör, Ethernet link'i veya Wi-Fi çıkışı kayboluyor | Paylaşım temizlenir; kapak kapalıysa ardından uyku istenir |
+| Paylaşım aktifken AC çıkarılıyor | Paylaşım bataryada kesintisiz sürer; uyku override'ı korunur |
 | Adaptör yok | Uyku ayarlarına dokunulmaz; uyanma zamanlayıcısı kurulmaz |
 | Servis çöküyor veya yeniden başlatılıyor | Kalıcı journal okunur, eski oturum temizlenir, koşullar yeniden değerlendirilir |
 | Mac kapatılıp yeniden açılıyor | Sistem daemon'ı boot sırasında yeniden yüklenir; adaptör sonradan takıldığında otomasyon çalışır |
@@ -84,7 +87,7 @@ canlı takip eder; çıkmak için `Ctrl+C` kullanılır. Örnek olay sırası:
 ```text
 2026-09-20T10:30:00+03:00 STATE adapter=connected(en9) ethernet=up power=AC wifi=ready lid=open automation=enabled
 2026-09-20T10:30:00+03:00 SHARING start-trigger reason=all-conditions-ready interface=en9
-2026-09-20T10:30:01+03:00 SHARING started interface=en9 client=192.168.2.2 power-policy=AC-only
+2026-09-20T10:30:01+03:00 SHARING started interface=en9 client=192.168.2.2 power-policy=AC-or-battery
 2026-09-20T10:31:10+03:00 STATE adapter=connected(en9) ethernet=up power=AC wifi=ready lid=closed automation=enabled
 2026-09-20T10:35:00+03:00 STATE adapter=disconnected ethernet=down power=AC wifi=ready lid=closed automation=enabled
 2026-09-20T10:35:00+03:00 SHARING stop-trigger reason=adapter-removed
@@ -92,7 +95,7 @@ canlı takip eder; çıkmak için `Ctrl+C` kullanılır. Örnek olay sırası:
 2026-09-20T10:35:01+03:00 SLEEP requested reason=lid-closed-after-sharing-stop
 ```
 
-Adaptör, Ethernet, AC ve ağ değişimleri olay bildirimiyle hızlıca görülür. Kapak durumu
+Adaptör, Ethernet, güç kaynağı ve ağ değişimleri olay bildirimiyle hızlıca görülür. Kapak durumu
 10 saniyelik uzlaştırma kontrolünde kaydedildiği için kapatma satırı en geç yaklaşık
 10 saniye sonra yazılabilir. Bu timer uyuyan Mac'i uyandırmaz. Log root'a ait `0600`
 izinlidir; komut bu yüzden `sudo` isteyebilir. `newsyslog`, dosya 1 MB'ı geçtiğinde
@@ -171,13 +174,18 @@ internetten PS5'e port açan `rdr`/port-forwarding kuralları eklenmez.
   bu servis aktifken başka bir paylaşım/router servisi başlatılmamalıdır.
 - `sleep`, `displaysleep`, `hibernatemode`, `womp` değiştirilmez. Özellikle `sleep=0`
   kalıcı olarak yazılmaz. Kapak kapalı çalışmak için kullanılan `disablesleep`
-  belgelenmemiş ve **sistem genelinde** bir ayardır; AC sınırı daemon tarafından uygulanır.
+  belgelenmemiş ve **sistem genelinde** bir ayardır. Paylaşım bataryada da çalıştığı için
+  adaptör takılı ve link aktif kaldığı sürece bu override korunur.
 - Durum root'a ait `0700` izinli `/var/db/ps5share` içinde JSON olarak saklanır;
   shell ile `source` edilmez. Hata durumunda diğer temizleme adımları da denenir ve
   başarısız journal yeniden denemek üzere korunur. Aynı anda ikinci daemon çalışamaz.
 - Servis yeniden açılana kadar `SleepDisabled` çökme sonrası kısa süre etkin kalabilir.
   `launchd` yeniden başlatır; başka root yazılımlar veya servis kaldırılması kurtarmayı
   engellerse aşağıdaki recovery komutu gerekir. Sıfır risk/garantili lid desteği iddiası yoktur.
+- Batarya kritik seviyede aniden kapanırsa journal diskte kalır. Sistem aynı boot'u
+  hibernation'dan sürdürürse adaptör yokken PF, forwarding ve uyku ayarı temizlenir.
+  Yeni bir boot oluşursa servis eski boot'un geçici PF/arayüz/sysctl durumuna dokunmaz;
+  yalnızca kalıcı `SleepDisabled` değerini geri yükler ve journal'ı temizler.
 - Kapağı kapalı Mac'i sert, havalanan bir yüzeyde kullanın; çantaya koymadan adaptörü çıkarın.
 - Başlatma ve temizliğin ürettiği ağ bildirimleri seri bir kapıdan geçirilir. İşlem sırasında
   gelen birden fazla callback iç içe start/stop çalıştırmaz; bittikten sonra tek yeni
@@ -201,7 +209,8 @@ IOPowerSources bildirimleri kullanılır. Normal 10 saniyelik timer yalnızca Ma
 - 32 başlangıç koşulu kombinasyonu, token/arayüz doğrulaması ve JSON round-trip.
 - Gerçek sistem komutları çalıştıramayan test binary'sinde start/stop, tekrarlı stop,
   beş başlangıç aşamasına enjekte edilen hata, cleanup hatası/yeniden deneme, kapalı/açık kapakta
-  uyku sıralaması, token kaydetme arası çökme, boot kapsamlı manuel duraklatma ve reboot kurtarması.
+  uyku sıralaması, token kaydetme arası çökme, boot kapsamlı manuel duraklatma ve batarya
+  bitmesi sonrası adaptör çıkarılmış halde hibernation ve reboot kurtarması.
 - Üretilen PF kurallarının `pfctl -nf` ile yüklemeden sözdizimi kontrolü.
 
 Fiziksel kabul testi kurulumdan sonra yapılmalıdır; bu testler otomatik testlerin yerine geçmez:
@@ -210,9 +219,12 @@ Fiziksel kabul testi kurulumdan sonra yapılmalıdır; bu testler otomatik testl
 2. Kilit ekranında tak; eduroam hazırken kilidi açmadan PS5 internetini kontrol et.
 3. Mac uyurken tak, kapağı aç; yaklaşık 10 saniye ve ağın geri gelme süresi sonunda bağlanmalı.
 4. Aktifken kapağı kapat; PS5 trafiği sürmeli. Adaptörü çıkar; Mac uyumalı.
-5. Aktif ve kapak kapalıyken AC gücü çıkar; paylaşım kapanıp Mac uyumalı.
-6. Aktif oturumda daemon'ı yeniden başlat; temizlik ve yeniden aktivasyon logunu doğrula.
-7. Adaptörsüz yeniden başlat; normal idle/lid sleep davranışını kontrol et.
+5. Aktif ve kapak kapalıyken AC gücü çıkar; paylaşım bataryada sürmeli. Adaptörü çıkarınca
+   paylaşım temizlenip Mac uyumalı.
+6. Aktif oturumdayken bataryanın kritik seviyede kapanmasını simüle et/test et; Mac kapalıyken
+   adaptörü çıkar, güç bağlayıp aç ve `SleepDisabled` değerinin eski haline döndüğünü doğrula.
+7. Aktif oturumda daemon'ı yeniden başlat; temizlik ve yeniden aktivasyon logunu doğrula.
+8. Adaptörsüz yeniden başlat; normal idle/lid sleep davranışını kontrol et.
 
 Kaldırmak için:
 

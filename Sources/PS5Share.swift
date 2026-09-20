@@ -17,6 +17,7 @@ let anchor = "com.apple/ps5share"
 let directory = NSTemporaryDirectory() + "ps5share-tests-" + UUID().uuidString
 var commandOverride: ((String, [String], String?) throws -> String)?
 var testLidClosed = false
+var testMatchingAdapter: String? = "en9"
 #else
 let directory = "/var/db/ps5share"
 #endif
@@ -83,7 +84,7 @@ func run(_ path: String, _ args: [String], input: String? = nil) throws -> Strin
     if input != nil {
         try pipe.fileHandleForReading.close()
     }
-    // A stuck utility must not leave AC/removal events blocked indefinitely.
+    // A stuck utility must not leave power-source/removal events blocked indefinitely.
     let deadline = DispatchSource.makeTimerSource(queue: .global())
     deadline.schedule(deadline: .now() + 5)
     deadline.setEventHandler {
@@ -198,7 +199,7 @@ func acPower() -> Bool {
 
 func matchingAdapter() -> String? {
     #if TESTING
-    return "en9"
+    return testMatchingAdapter
     #else
     var iterator: io_iterator_t = 0
     guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOEthernetInterface"), &iterator) == KERN_SUCCESS else { return nil }
@@ -240,7 +241,7 @@ struct Conditions: Equatable {
     var upstream: Bool
     var paused: Bool
     var lidClosed: Bool
-    var ready: Bool { interface != nil && ac && link && upstream && !paused }
+    var ready: Bool { interface != nil && link && upstream && !paused }
 }
 
 func conditions() -> Conditions {
@@ -358,10 +359,10 @@ func start(_ interface: String) throws {
     state.forwardingChanged = true; try save(state)
     try run("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=1"])
     state.sleepChanged = true; try save(state)
-    // This is system-wide despite -c in the legacy script. AC gating is done by this daemon.
+    // This is system-wide despite -c in the legacy script. It is restored when sharing stops.
     try run("/usr/bin/pmset", ["disablesleep", "1"])
     guard try disabledSleep() == 1 else { throw Failure("macOS did not accept the lid-sleep override.") }
-    log("SHARING started interface=\(interface) client=\(consoleIP) power-policy=AC-only")
+    log("SHARING started interface=\(interface) client=\(consoleIP) power-policy=AC-or-battery")
 }
 
 // Attempt every cleanup step even when one fails. Retain the journal for retries.
@@ -453,7 +454,6 @@ func stopReasons(_ status: Conditions) -> String {
     var reasons: [String] = []
     if status.interface == nil { reasons.append("adapter-removed") }
     else if !status.link { reasons.append("ethernet-link-down") }
-    if !status.ac { reasons.append("AC-disconnected") }
     if !status.upstream { reasons.append("wifi-unavailable") }
     if status.paused { reasons.append("manual-pause") }
     return reasons.isEmpty ? "session-drift" : reasons.joined(separator: ",")
@@ -576,7 +576,8 @@ func selfTest() throws {
         let c = Conditions(interface: mask & 1 != 0 ? "en9" : nil, ac: mask & 2 != 0,
                            link: mask & 4 != 0, upstream: mask & 8 != 0,
                            paused: mask & 16 != 0, lidClosed: false)
-        try check(c.ready == (mask == 15), "Start policy truth table \(mask)")
+        let expected = mask & 1 != 0 && mask & 4 != 0 && mask & 8 != 0 && mask & 16 == 0
+        try check(c.ready == expected, "Start policy truth table \(mask)")
     }
     let original = Snapshot(interface: "en9", boot: "example", forwarding: 0, sleepDisabled: 0, sleepChanged: true)
     let restored = try JSONDecoder().decode(Snapshot.self, from: JSONEncoder().encode(original))
@@ -585,6 +586,8 @@ func selfTest() throws {
     try check(!rules.contains("pass quick on en0 all") && rules.contains("192.168.2.2/32"), "Narrow PF policy")
     let closed = Conditions(interface: "en9", ac: true, link: true, upstream: true, paused: false, lidClosed: true)
     try check(stateDescription(closed).contains("lid=closed"), "Lid state logging")
+    let battery = Conditions(interface: "en9", ac: false, link: true, upstream: true, paused: false, lidClosed: true)
+    try check(battery.ready && !stopReasons(battery).contains("AC"), "Battery power must allow and preserve sharing")
     try check(stopReasons(Conditions(interface: nil, ac: true, link: false, upstream: true, paused: false, lidClosed: true)) == "adapter-removed", "Adapter removal reason")
     let gate = SerialCoalescer()
     var reconciliationPasses = 0
@@ -674,6 +677,19 @@ func recoveryTests() throws {
     let openLidCount = calls.count
     try cleanup(sleepAfter: true)
     try assert(!calls.dropFirst(openLidCount).contains("/usr/bin/pmset sleepnow"), "Open lid must not force sleep")
+    // Critical battery can resume from hibernation without changing the boot ID.
+    // If the adapter was removed while powered down, cleanup must still restore
+    // PF, forwarding and sleep state; the vanished interface needs no alias removal.
+    try start("en9")
+    testMatchingAdapter = nil
+    let hibernationCount = calls.count
+    try cleanup(sleepAfter: false)
+    let hibernationCalls = calls.dropFirst(hibernationCount)
+    try assert(!rules && !token && forward == 0 && sleep == 0 && !fm.fileExists(atPath: statePath), "Same-boot power-loss recovery with adapter absent failed")
+    try assert(!hibernationCalls.contains("/sbin/ifconfig en9 inet 192.168.2.1 -alias"), "Absent adapter must not receive an alias-removal command")
+    // Model the hardware removal discarding the interface and its addresses.
+    ip = false
+    testMatchingAdapter = "en9"
     // Simulate death after pfctl returned a token but before JSON saved it.
     try start("en9")
     var interrupted = try loadState()!
@@ -682,12 +698,17 @@ func recoveryTests() throws {
     try Data("Token : 123456\n".utf8).write(to: URL(fileURLWithPath: receiptPath))
     try cleanup(sleepAfter: false)
     try assert(!token && !fm.fileExists(atPath: receiptPath), "PF receipt crash recovery failed")
+    // Simulate an abrupt critical-battery shutdown. The adapter is then removed while
+    // the Mac is off, so the next boot gets no removal event. Recovery must restore
+    // the persistent sleep override without touching stale per-boot network/PF state.
     try start("en9")
     currentBoot = "boot-two"
+    testMatchingAdapter = nil
     let rebootCount = calls.count
     try cleanup(sleepAfter: false)
-    try assert(sleep == 0, "Reboot recovery did not restore sleep")
+    try assert(sleep == 0 && !fm.fileExists(atPath: statePath), "Power-loss recovery did not restore sleep and clear its journal")
     try assert(!calls.dropFirst(rebootCount).contains { $0.contains("pfctl") || $0.contains("ifconfig") || $0.contains("-w net.inet") }, "Reboot recovery touched new boot network state")
+    testMatchingAdapter = "en9"
     try assert(!calls.contains { $0 == "/sbin/pfctl -d" || $0.hasPrefix("/sbin/pfctl -f") }, "Global PF mutation")
     try pauseForCurrentBoot()
     try assert(pausedForCurrentBoot(), "Manual pause must apply during the current boot")
@@ -696,7 +717,7 @@ func recoveryTests() throws {
     try Data().write(to: URL(fileURLWithPath: pausedPath))
     try assert(pausedForCurrentBoot(), "Legacy empty pause marker must be honored during migration")
     try assert((try String(contentsOfFile: pausedPath, encoding: .utf8)).contains("boot-three"), "Legacy pause marker was not migrated")
-    print("Passed: start/stop, idempotence, 5 partial-start failures, cleanup retry, closed/open lid, token receipt, boot-scoped pause and reboot recovery.")
+    print("Passed: start/stop, idempotence, 5 partial-start failures, cleanup retry, closed/open lid, token receipt, boot-scoped pause and critical-battery hibernation/reboot recovery.")
 }
 #endif
 
@@ -725,7 +746,7 @@ do {
         if command == "stop" { try pauseForCurrentBoot() }
         else if fm.fileExists(atPath: pausedPath) { try fm.removeItem(atPath: pausedPath) }
         try run("/bin/launchctl", ["kill", "SIGUSR1", "system/local.ps5share"])
-        print(command == "stop" ? "Paused for this boot; daemon will clean up. Reboot or run start to resume automatic sharing." : "Automatic sharing resumed; waiting for adapter, AC and Wi-Fi.")
+        print(command == "stop" ? "Paused for this boot; daemon will clean up. Reboot or run start to resume automatic sharing." : "Automatic sharing resumed; waiting for adapter and Wi-Fi.")
     case "recover": try acquireLock(); try cleanup(sleepAfter: false)
     default: throw Failure("Usage: ps5shared {watch|observe|status|start|stop|recover|self-test|process-test|rules}")
     }
