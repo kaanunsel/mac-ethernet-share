@@ -1,12 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 binary=/Library/PrivilegedHelperTools/local.ethernetshare/ethernetshared
+project_root="$(cd "$(dirname "$0")" && pwd)"
 case "${1:-status}" in
+  dashboard)
+    exec "$project_root/dashboard.sh" open
+    ;;
   logs)
     exec sudo /usr/bin/tail -n 100 -F /var/log/ethernetshare.log
     ;;
   start|stop|status|recover|restart) ;;
-  *) echo "Usage: $0 {start|stop|restart|status|logs|recover}" >&2; exit 1 ;;
+  *) echo "Usage: $0 {start|stop|restart|status|logs|recover|dashboard}" >&2; exit 1 ;;
 esac
 if [[ ! -x "$binary" ]]; then
   echo "Install first: bash build.sh && sudo bash install.sh" >&2

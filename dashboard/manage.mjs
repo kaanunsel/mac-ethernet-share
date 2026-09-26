@@ -34,6 +34,24 @@ if (action === "install") {
   }
   console.log("Dashboard starts at login: http://127.0.0.1:3847");
 } else if (action === "open") {
+  let ready = false;
+  try {
+    execFileSync("/usr/bin/curl", ["--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:3847/"], { timeout: 2000 });
+    ready = true;
+  } catch {}
+  if (!ready) {
+    execFileSync("/bin/bash", [path.join(root, "dashboard.sh"), "install"], { stdio: "inherit" });
+    for (let attempt = 0; attempt < 30; attempt++) {
+      try {
+        execFileSync("/usr/bin/curl", ["--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:3847/"], { timeout: 2000 });
+        ready = true;
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+  }
+  if (!ready) throw new Error("Dashboard did not start. Check .build/dashboard.log.");
   const key = readFileSync(
     path.join(root, ".build/dashboard-access.key"),
     "utf8",

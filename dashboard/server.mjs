@@ -19,6 +19,7 @@ const origin = `http://127.0.0.1:${port}`;
 const socket = `/var/run/ethernetshare-dashboard-${uid}.sock`;
 const token = randomBytes(32).toString("hex");
 const binary = path.join(root, ".build/ethernetshared");
+const installedBinary = "/Library/PrivilegedHelperTools/local.ethernetshare/ethernetshared";
 const keyPath = path.join(root, ".build/dashboard-access.key");
 let keyFile;
 try {
@@ -134,6 +135,13 @@ async function collect() {
     }
     cache = {
       ...status,
+      installation: {
+        installed: await readFile(installedBinary).then(() => true).catch(() => false),
+        updateAvailable: await Promise.all([
+          readFile(binary).catch(() => null),
+          readFile(installedBinary).catch(() => null),
+        ]).then(([local, installed]) => Boolean(local && (!installed || !local.equals(installed)))),
+      },
       managed,
       ports: hardware(status.hardware),
       traffic: { rate, totals: sample, history },
@@ -183,6 +191,15 @@ async function authorize() {
   throw new Error(
     "Management helper did not start. See /var/log/ethernetshare-dashboard.log.",
   );
+}
+async function installUpdate() {
+  await execute("/bin/bash", ["build.sh"], {
+    cwd: root,
+    timeout: 120000,
+    maxBuffer: 2e6,
+  });
+  await elevated(`set -e\ncd ${quote(root)}\n/bin/bash install.sh`);
+  return "Service update installed. Reboot this Mac to clear any old, untracked network state.";
 }
 async function applyConfiguration(body) {
   const config = validateConfiguration(body);
@@ -313,6 +330,8 @@ const server = http.createServer(async (req, res) => {
         "restart",
         "revoke",
         "configure",
+        "install-update",
+        "reboot",
         "refresh",
       ];
       if (!allowed.includes(value.action))
@@ -329,6 +348,11 @@ const server = http.createServer(async (req, res) => {
           if (!cache?.managed)
             throw new Error("Enable management access first.");
           message = await applyConfiguration(value);
+        } else if (value.action === "install-update") {
+          message = await installUpdate();
+        } else if (value.action === "reboot") {
+          await elevated("/sbin/shutdown -r +1");
+          message = "Mac restart scheduled in about one minute. Save any other work now.";
         } else if (value.action === "revoke")
           message = await bridge("shutdown");
         else if (value.action !== "refresh")

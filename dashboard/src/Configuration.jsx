@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from "react";
-import { Network, EthernetPort, ShieldCheck } from "lucide-react";
+import { EthernetPort, ShieldCheck, Download, RotateCw } from "lucide-react";
 import { Badge, Panel, Rows, Modal } from "./components";
 export function Configuration({ s, busy, act }) {
   const [mac, setMac] = useState(s.configuration.ethernetMAC),
     [upstream, setUpstream] = useState(s.configuration.upstreamInterface),
-    [confirm, setConfirm] = useState(false);
+    [confirm, setConfirm] = useState(false),
+    [maintenance, setMaintenance] = useState(null);
   const changed =
     mac !== s.configuration.ethernetMAC ||
     upstream !== s.configuration.upstreamInterface;
@@ -109,6 +110,40 @@ export function Configuration({ s, busy, act }) {
         </form>
       </Panel>
       <div>
+        <Panel
+          title="Service maintenance"
+          extra={<Badge good={s.installation?.installed && !s.installation?.updateAvailable}>
+            {!s.installation?.installed ? "Not installed" : s.installation?.updateAvailable ? "Update available" : "Up to date"}
+          </Badge>}
+        >
+          <p className="section-description">
+            {!s.installation?.installed
+              ? "The service is not installed yet. Install it with your Mac administrator password."
+              : s.installation?.updateAvailable
+              ? "A newer service build is ready in this project. Install it with your Mac administrator password."
+              : "The installed service matches the local build."}
+          </p>
+          <div className="form-actions">
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={() => setMaintenance("install-update")}
+            >
+              <Download size={17} /> Install service update
+            </button>
+            <button
+              className="secondary"
+              disabled={busy}
+              onClick={() => setMaintenance("reboot")}
+            >
+              <RotateCw size={17} /> Restart Mac
+            </button>
+          </div>
+          <p className="footnote">
+            Installation can briefly pause sharing. Restarting clears network
+            state left by a previous service session.
+          </p>
+        </Panel>
         <Panel title="Client setup" extra={<EthernetPort size={19} />}>
           <p className="section-description">
             Enter these static IPv4 settings on your Ethernet device.
@@ -174,6 +209,31 @@ export function Configuration({ s, busy, act }) {
               }}
             >
               Apply and pause sharing
+            </button>
+          </div>
+        </Modal>
+      )}
+      {maintenance && (
+        <Modal
+          title={maintenance === "reboot" ? "Restart this Mac?" : "Install service update?"}
+          onClose={() => setMaintenance(null)}
+        >
+          <p>
+            {maintenance === "reboot"
+              ? "macOS will schedule a restart in about one minute. Save your other work before continuing. Sharing will resume according to its saved state after startup."
+              : "The latest service build will be installed and the sharing service restarted. macOS will ask for administrator approval. Keep the Ethernet adapter unplugged until installation finishes."}
+          </p>
+          <div className="form-actions">
+            <button className="secondary" onClick={() => setMaintenance(null)}>Cancel</button>
+            <button
+              className="primary"
+              onClick={() => {
+                const action = maintenance;
+                setMaintenance(null);
+                act(action);
+              }}
+            >
+              {maintenance === "reboot" ? "Schedule restart" : "Install update"}
             </button>
           </div>
         </Modal>

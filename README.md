@@ -113,6 +113,7 @@ ethernetshare restart
 ethernetshare start
 ethernetshare stop
 ethernetshare status
+ethernetshare dashboard
 ```
 
 Replace any older `ethernetshare` alias that appended `start`. This alias only
@@ -299,6 +300,7 @@ the sharing daemon itself remains standalone Swift.
 ./dashboard.sh start     # Start the installed dashboard again
 ./dashboard.sh serve     # Run in the foreground instead (if not already running)
 ./dashboard.sh uninstall # Remove the dashboard's login item
+ethernetshare dashboard  # Start it if needed and open it in the default browser
 ```
 
 For the first visit in each browser, use `./dashboard.sh open`. It hands off a
@@ -314,7 +316,8 @@ The dashboard provides:
 - **Overview:** live adapter/upstream/link state, a connection diagram, interface
   traffic, power status, pause/resume, and the existing guarded restart operation.
 - **Configuration:** detected hardware ports, adapter MAC and upstream selection,
-  a build-and-install workflow, and the static settings to enter on the client.
+  a build-and-install workflow, one-click service update and Mac restart controls,
+  and the static settings to enter on the client.
 - **Activity:** the latest 250 service log lines, text/error filters, and export.
 - **Diagnostics:** readiness, forwarding, power hold, recovery journal, actual PF
   rules, launchd details, and a JSON export.
@@ -336,6 +339,12 @@ through `/var/run/ethernetshare-dashboard-<uid>.sock` (mode 0600, owned by that
 user). It cannot run arbitrary caller-supplied shell commands. Disabling management
 terminates the helper without changing sharing. After reboot, re-enable management
 from the UI; the dashboard itself starts automatically at login.
+
+To apply a newer service build, open **Configuration → Service maintenance →
+Install service update**, confirm, and approve the macOS administrator prompt.
+The dashboard builds the current source and uses the normal installer. To clear
+old, untracked forwarding state after an update, use **Restart Mac** in the same
+panel and confirm the scheduled restart. Save other work before doing so.
 
 Traffic is the selected Ethernet interface's byte counters, not a speed test or
 proof of internet reachability. Upload means traffic received **from the client**;
