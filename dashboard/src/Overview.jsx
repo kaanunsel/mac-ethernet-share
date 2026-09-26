@@ -149,6 +149,11 @@ function Metrics({ s }) {
     </section>
   );
 }
+const trafficRanges = [
+  [1, "Last minute"], [5, "Last 5 minutes"], [15, "Last 15 minutes"],
+  [30, "Last 30 minutes"], [60, "Last hour"],
+  [180, "Last 3 hours"], [360, "Last 6 hours"],
+];
 function Traffic({ s }) {
   const { t, locale } = useI18n();
   const [minutes, setMinutes] = useState(5);
@@ -187,9 +192,7 @@ function Traffic({ s }) {
             value={minutes}
             onChange={(e) => setMinutes(Number(e.target.value))}
           >
-            <option value={1}>{t("Last minute")}</option>
-            <option value={5}>{t("Last 5 minutes")}</option>
-            <option value={15}>{t("Last 15 minutes")}</option>
+            {trafficRanges.map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}
           </select>
         </div>
       }
@@ -198,7 +201,7 @@ function Traffic({ s }) {
         <svg
           viewBox="0 0 775 226"
           role="img"
-          aria-label={t("Ethernet traffic over the last {minutes} minutes in megabits per second", { minutes })}
+          aria-label={t("Ethernet traffic for {range} in megabits per second", { range: t(trafficRanges.find(([value]) => value === minutes)[1]) })}
         >
           {[0, 1, 2, 3, 4].map((i) => (
             <g key={i}>
@@ -246,7 +249,7 @@ function Traffic({ s }) {
         )}
       </div>
       <p className="chart-note">
-        {t("Ethernet interface traffic · sampled every 2 seconds · history retained while the dashboard runs")} <Help text="This chart shows current download and upload speeds between the Mac and Ethernet device. It does not directly test internet reachability." />
+        {t("Live samples every 2 seconds · older history averaged every 30 seconds · retained while the dashboard runs")} <Help text="This chart shows current download and upload speeds between the Mac and Ethernet device. It does not directly test internet reachability." />
       </p>
     </Panel>
   );

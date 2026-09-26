@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { readFile, writeFile, rename, open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { counters, hardware, rates, validateConfiguration } from "./lib.mjs";
+import { chartHistory, counters, hardware, rates, validateConfiguration } from "./lib.mjs";
 const execute = promisify(execFile);
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(directory);
@@ -119,7 +119,7 @@ async function collect() {
         ? rates(lastSample?.value, sample, (now - lastSample.time) / 1000)
         : null;
     history.push({ time: now, ...(rate || { download: null, upload: null }) });
-    history = history.filter((p) => now - p.time <= 15 * 60000).slice(-300);
+    history = history.filter((p) => now - p.time <= 6 * 60 * 60000);
     lastSample = { value: sample, time: now, adapter: status.adapter };
     let logs = [];
     if (managed) {
@@ -144,7 +144,7 @@ async function collect() {
       },
       managed,
       ports: hardware(status.hardware),
-      traffic: { rate, totals: sample, history },
+      traffic: { rate, totals: sample, history: chartHistory(history, now) },
       logs,
     };
     lastError = null;

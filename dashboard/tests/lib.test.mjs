@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateConfiguration, counters, hardware, rates } from "../lib.mjs";
+import { validateConfiguration, counters, hardware, rates, chartHistory } from "../lib.mjs";
 test("configuration rejects shell injection and invalid or multicast addresses", () => {
   for (const mac of [
     "",
@@ -52,4 +52,19 @@ test("hardware inventory keeps display names and exact identifiers", () => {
     ),
     [{ name: "USB LAN", interface: "en9", mac: "aa:00:00:00:00:01" }],
   );
+});
+
+test("six-hour chart history stays compact while keeping recent samples and gaps", () => {
+  const now = 6 * 60 * 60000;
+  const samples = Array.from({ length: 10800 }, (_, i) => ({
+    time: i * 2000,
+    download: i < 20 ? null : 2,
+    upload: i < 20 ? null : 1,
+  }));
+  const chart = chartHistory(samples, now);
+  assert.ok(chart.length <= 1200);
+  assert.deepEqual(chart[0], { time: 28000, download: null, upload: null });
+  assert.deepEqual(chart[1], { time: 58000, download: 2, upload: 1 });
+  assert.deepEqual(chart.at(-1), samples.at(-1));
+  assert.ok(chart.every((point, i) => i === 0 || point.time > chart[i - 1].time));
 });

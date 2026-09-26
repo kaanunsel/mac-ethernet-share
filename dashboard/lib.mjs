@@ -51,3 +51,33 @@ export function rates(previous, current, elapsed) {
     upload: ((current.rx - previous.rx) * 8) / elapsed / 1e6,
   };
 }
+
+export function chartHistory(history, now) {
+  const recentSince = now - 15 * 60000;
+  const older = new Map();
+  const recent = [];
+  for (const point of history) {
+    if (point.time >= recentSince) {
+      recent.push(point);
+      continue;
+    }
+    const bucket = Math.floor(point.time / 30000) * 30000;
+    if (!older.has(bucket)) older.set(bucket, { time: point.time, download: 0, upload: 0, downloads: 0, uploads: 0 });
+    const summary = older.get(bucket);
+    summary.time = point.time;
+    for (const key of ["download", "upload"]) {
+      if (point[key] !== null) {
+        summary[key] += point[key];
+        summary[key === "download" ? "downloads" : "uploads"]++;
+      }
+    }
+  }
+  return [
+    ...[...older.values()].map(({ time, download, upload, downloads, uploads }) => ({
+      time,
+      download: downloads ? download / downloads : null,
+      upload: uploads ? upload / uploads : null,
+    })),
+    ...recent,
+  ];
+}

@@ -356,8 +356,9 @@ is running; raw exported logs retain their original service text.
 Traffic is the selected Ethernet interface's byte counters, not a speed test or
 proof of internet reachability. Upload means traffic received **from the client**;
 download means traffic transmitted **to the client**. Totals are since interface
-counter reset. History is sampled about every two seconds, kept in memory for up to
-15 minutes, and resets when the dashboard process restarts. No traffic is invented
+counter reset. History is sampled about every two seconds and kept in memory for up to
+six hours. Samples older than 15 minutes are averaged into 30-second chart points;
+history resets when the dashboard process restarts. No traffic is invented
 for an absent interface. A stale-status notice appears when samples are overdue.
 
 If NAT/forwarding exist without a recovery journal, the dashboard reports
