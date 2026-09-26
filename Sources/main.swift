@@ -908,9 +908,115 @@ func recoveryTests() throws {
 }
 #endif
 
+// JSON is also consumed by the loopback dashboard. Unknown privileged state is null.
+func dashboardStatus() throws -> String {
+    let c = conditions()
+    let privileged = geteuid() == 0
+    var errors: [String] = []
+    func read(_ path: String, _ args: [String]) -> String? {
+        do { return try run(path, args).trimmingCharacters(in: .whitespacesAndNewlines) }
+        catch { errors.append(String(describing: error)); return nil }
+    }
+    let session = privileged ? try loadState() : nil
+    let power = privileged ? try loadPower() : nil
+    let nat = privileged ? read("/sbin/pfctl", ["-a", anchor, "-sn"]) : nil
+    let filter = privileged ? read("/sbin/pfctl", ["-a", anchor, "-sr"]) : nil
+    let forward = read("/usr/sbin/sysctl", ["-n", "net.inet.ip.forwarding"])
+    let service = read("/bin/launchctl", ["print", "system/local.ethernetshare"])
+    let upstreamAddresses = storeValue("State:/Network/Interface/\(wifi)/IPv4")?["Addresses"] as? [String] ?? []
+    let primary = storeValue("State:/Network/Global/IPv4")?["PrimaryInterface"] as? String
+    let sleep = try? disabledSleep()
+    let sharing: Bool? = privileged ? session != nil && session?.address == true && session?.rules == true && session?.token != nil && c.ready && forward == "1" && nat?.contains(clientIP) == true && service?.contains("state = running") == true : nil
+    let data: [String: Any] = [
+        "timestamp": ISO8601DateFormatter().string(from: Date()), "privileged": privileged,
+        "configuration": ["ethernetMAC": ethernetMAC, "upstreamInterface": wifi, "gateway": gateway, "clientIP": clientIP, "subnetMask": "255.255.255.0", "dns": ["1.1.1.1", "8.8.8.8"]],
+        "adapter": c.interface as Any? ?? NSNull(), "ac": c.ac, "link": c.link,
+        "upstream": c.upstream, "upstreamAddresses": upstreamAddresses, "primaryInterface": primary as Any? ?? NSNull(),
+        "lidClosed": c.lidClosed, "paused": privileged ? c.paused as Any : NSNull(),
+        "sharing": sharing as Any? ?? NSNull(), "ready": privileged ? c.ready as Any : NSNull(),
+        "session": session.map { ["interface": $0.interface, "address": $0.address, "rules": $0.rules, "forwardingChanged": $0.forwardingChanged, "originalForwarding": $0.forwarding] as [String: Any] } as Any? ?? NSNull(),
+        "powerHold": privileged ? (power != nil) as Any : NSNull(), "sleepDisabled": sleep as Any? ?? NSNull(),
+        "forwarding": forward.flatMap(Int.init) as Any? ?? NSNull(),
+        "serviceRunning": service?.contains("state = running") as Any? ?? NSNull(),
+        "service": service as Any? ?? NSNull(), "natRules": nat as Any? ?? NSNull(), "filterRules": filter as Any? ?? NSNull(),
+        "power": read("/usr/bin/pmset", ["-g", "batt"]) as Any? ?? NSNull(),
+        "counters": read("/usr/sbin/netstat", ["-ibn"]) as Any? ?? NSNull(),
+        "hardware": read("/usr/sbin/networksetup", ["-listallhardwareports"]) as Any? ?? NSNull(),
+        "errors": errors
+    ]
+    return String(decoding: try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]), as: UTF8.self)
+}
+
+// Narrow root bridge: a protected Unix socket, no shell, no caller-supplied paths.
+// Its lifetime is the dashboard session, and it never accepts arbitrary commands.
+func dashboardAgent() throws {
+    guard geteuid() == 0, CommandLine.arguments.count == 3,
+          let uid = UInt32(CommandLine.arguments[2]), uid > 0 else { throw Failure("dashboard-agent requires root and a user ID") }
+    let path = "/var/run/ethernetshare-dashboard-\(uid).sock"
+    var info = stat()
+    if lstat(path, &info) == 0 {
+        guard (info.st_mode & S_IFMT) == S_IFSOCK, info.st_uid == uid else { throw Failure("Unsafe dashboard socket") }
+        // A live bridge owns this path. Never disconnect its clients.
+        let probe = socket(AF_UNIX, SOCK_STREAM, 0)
+        var target = sockaddr_un(); target.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &target.sun_path) { $0.copyBytes(from: Array(path.utf8) + [0]) }
+        let alive = withUnsafePointer(to: &target) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(probe, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0 } }
+        close(probe)
+        if alive { return }
+        guard unlink(path) == 0 else { throw Failure("Cannot remove stale dashboard socket") }
+    }
+    let server = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard server >= 0 else { throw Failure("Cannot create dashboard socket") }
+    defer { close(server); unlink(path) }
+    var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
+    withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: Array(path.utf8) + [0]) }
+    let oldMask = umask(0o077)
+    let result = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(server, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+    umask(oldMask)
+    guard result == 0, chmod(path, 0o600) == 0, chown(path, uid, 0) == 0, listen(server, 8) == 0 else { throw Failure("Cannot bind protected dashboard socket") }
+    signal(SIGPIPE, SIG_IGN)
+    let installed = "/Library/PrivilegedHelperTools/local.ethernetshare/ethernetshared"
+    while true {
+        let client = accept(server, nil, nil)
+        if client < 0 { continue }
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var request = Data(); var byte: UInt8 = 0
+        while request.count < 64 && Darwin.read(client, &byte, 1) == 1 && byte != 10 { request.append(byte) }
+        let command = String(decoding: request, as: UTF8.self)
+        var response: [String: Any]
+        do {
+            let output: String
+            switch command {
+            case "status": output = try run(installed, ["dashboard-json"])
+            case "start", "stop", "restart": output = try run(installed, [command])
+            case "logs": output = try run("/usr/bin/tail", ["-n", "250", logPath])
+            case "shutdown": output = "Management access disabled."
+            default: throw Failure("Unsupported dashboard command")
+            }
+            response = ["ok": true, "output": output]
+        } catch { response = ["ok": false, "error": String(describing: error)] }
+        if let data = try? JSONSerialization.data(withJSONObject: response) {
+            let payload = data + Data([10])
+            payload.withUnsafeBytes { buffer in
+                var offset = 0
+                while offset < buffer.count {
+                    let sent = Darwin.write(client, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                    if sent <= 0 { break }; offset += sent
+                }
+            }
+        }
+        close(client)
+        if command == "shutdown" { break }
+    }
+}
+
 do {
     let command = CommandLine.arguments.dropFirst().first ?? "status"
     switch command {
+    case "dashboard-json": print(try dashboardStatus())
+    case "dashboard-agent": try dashboardAgent()
     case "check-config": try validateConfiguration(); print("Configuration is valid.")
     case "watch": try validateConfiguration(); try watch()
     case "observe": try validateConfiguration(); observing = true; try watch()

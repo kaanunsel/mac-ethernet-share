@@ -1,3 +1,6 @@
 .build/
 Configuration.local.swift
 .DS_Store
+dashboard/node_modules/
+dashboard/dist/
+Configuration.local.swift.dashboard-tmp

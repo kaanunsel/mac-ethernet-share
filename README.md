@@ -260,3 +260,99 @@ version, adapter model, reproduction steps, and sanitized logs when reporting bu
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Local dashboard
+
+The optional React dashboard runs only on this Mac at **http://127.0.0.1:3847**.
+It adds Node.js 20.19+ (or 22.12+) and npm as development/runtime requirements;
+the sharing daemon itself remains standalone Swift.
+
+```bash
+./dashboard.sh install   # Build, run in the background, and start at login
+./dashboard.sh open      # Connect your default browser (one-time per browser)
+./dashboard.sh status    # Inspect the per-user launch agent
+./dashboard.sh stop      # Stop the web dashboard; sharing is unaffected
+./dashboard.sh start     # Start the installed dashboard again
+./dashboard.sh serve     # Run in the foreground instead (if not already running)
+./dashboard.sh uninstall # Remove the dashboard's login item
+```
+
+For the first visit in each browser, use `./dashboard.sh open`. It hands off a
+random access key stored in a user-only (0600) file to an HttpOnly, SameSite cookie,
+then removes the key from the URL. Subsequent visits use the plain address above.
+This prevents other local accounts from obtaining management access just by
+connecting to the loopback port. Do not share the initial access URL or
+`.build/dashboard-access.key`. Browser access expires after 30 days without a
+session refresh. Re-run `open` after clearing browser data.
+
+The dashboard provides:
+
+- **Overview:** live adapter/upstream/link state, a connection diagram, interface
+  traffic, power status, pause/resume, and the existing guarded restart operation.
+- **Configuration:** detected hardware ports, adapter MAC and upstream selection,
+  a build-and-install workflow, and the static settings to enter on the client.
+- **Activity:** the latest 250 service log lines, text/error filters, and export.
+- **Diagnostics:** readiness, forwarding, power hold, recovery journal, actual PF
+  rules, launchd details, and a JSON export.
+
+Select **Enable management** and approve macOS's administrator prompt. This
+upgrades the installed daemon with JSON status support, preserves its pause state,
+and starts a root-owned helper. A real upgrade can briefly interrupt sharing.
+Without authorization, the dashboard remains a monitor; protected values are
+shown as unavailable. Configuration changes always require a native administrator
+prompt, pause automation, recover using the old installed configuration, build and
+install the new configuration, and leave sharing paused for review. Configuration
+changes have not been live-tested against a second physical adapter.
+
+The web process runs as your normal user and binds exclusively to `127.0.0.1`.
+API access requires the private browser cookie; mutations also require a
+process-local token and same-origin/Host validation. The root
+helper accepts only status, bounded log reads, start, stop, restart, and shutdown
+through `/var/run/ethernetshare-dashboard-<uid>.sock` (mode 0600, owned by that
+user). It cannot run arbitrary caller-supplied shell commands. Disabling management
+terminates the helper without changing sharing. After reboot, re-enable management
+from the UI; the dashboard itself starts automatically at login.
+
+Traffic is the selected Ethernet interface's byte counters, not a speed test or
+proof of internet reachability. Upload means traffic received **from the client**;
+download means traffic transmitted **to the client**. Totals are since interface
+counter reset. History is sampled every five seconds, kept in memory for up to
+15 minutes, and resets when the dashboard process restarts. No traffic is invented
+for an absent interface. A stale-status notice appears when samples are overdue.
+
+If NAT/forwarding exist without a recovery journal, the dashboard reports
+**untracked forwarding**. A client may still have internet access in this state;
+it is not proof that the daemon owns a healthy session. Pausing automation cannot
+safely remove such untracked settings. Diagnose recovery when the client is idle;
+the dashboard does not automatically adopt or erase them.
+
+The fixed `192.168.2.0/24` subnet, single-client policy, PF rules, and adapter-based
+power policy are service invariants, shown in the UI rather than exposed as
+unsupported settings. Client DNS/static addressing must be entered on the client.
+
+Dashboard-specific installed paths:
+
+- Login item: `~/Library/LaunchAgents/local.ethernetshare.dashboard.plist`
+- Web process log: `.build/dashboard.log`
+- Root helper: `/Library/PrivilegedHelperTools/local.ethernetshare-dashboard/ethernetshared`
+- Helper registration: `/Library/LaunchDaemons/local.ethernetshare.dashboard-management.<uid>.plist`
+- Helper startup diagnostics: `/var/log/ethernetshare-dashboard.log`
+
+`dashboard.sh uninstall` removes only the per-user web login item. To remove the
+optional root helper too, first disable management in the UI, then run:
+
+```bash
+sudo launchctl bootout system/local.ethernetshare.dashboard-management.$(id -u)
+sudo rm /Library/LaunchDaemons/local.ethernetshare.dashboard-management.$(id -u).plist
+sudo rm /Library/PrivilegedHelperTools/local.ethernetshare-dashboard/ethernetshared
+sudo rmdir /Library/PrivilegedHelperTools/local.ethernetshare-dashboard
+```
+
+Verification:
+
+```bash
+npm test --prefix dashboard
+DASHBOARD_URL=http://127.0.0.1:3847 npm test --prefix dashboard # Also checks live API guards
+npm run build --prefix dashboard
+bash tests/check.sh
+```
