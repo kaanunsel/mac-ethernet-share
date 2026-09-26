@@ -146,6 +146,11 @@ USB accessory permission, or Wi-Fi authentication may require user interaction.
 - A persistent recovery journal records changes before they occur. Startup attempts
   cleanup after a crash; failures retain the journal for retry. Across boots only
   the persistent sleep setting is restored, not stale PF/interface state.
+  Boot identity uses `kern.bootsessionuuid`, so wall-clock corrections cannot be
+  mistaken for a reboot. Legacy timestamp records are accepted when their boot
+  seconds still match (microsecond/date-string drift is ignored). An ambiguous
+  legacy journal is retained for explicit recovery; an ambiguous old pause stays
+  paused until `start`, rather than silently resuming.
 - Rules live in `com.apple/ethernetshare`, using Apple's existing wildcard hooks.
   The daemon never replaces the root PF ruleset or disables PF globally. It releases
   only its own PF reference token. A crash at token acquisition can still leave an
@@ -221,6 +226,25 @@ run `start` if you had manually paused sharing. It refuses to run with the adapt
 attached. If recovery fails, it retains the journal and leaves the service stopped
 for diagnosis instead of starting over incomplete cleanup. It never blindly
 resets global forwarding or flushes other services' PF rules.
+
+### Client works but startup reports an existing IPv4 address
+
+Earlier versions used the full `kern.boottime` text as a boot identifier. Its
+microseconds can change without a reboot. On a client link-down event, that could
+send cleanup through its previous-boot branch: the journal was removed while the
+Mac's gateway address and PF rules remained. The next link-up then refused that
+address, even though the existing forwarding could still carry client traffic.
+This is a recovery-state bug, not merely a cosmetic log message. The current code
+uses the stable kernel boot-session UUID and includes clock-drift regression tests.
+
+Upgrading prevents new occurrences; it cannot reconstruct a recovery journal
+that an older version has already deleted. A dashboard **untracked forwarding**
+warning means the running connection still needs a controlled reset. Do not delete
+arbitrary adapter addresses or disable PF globally to silence the error. When the
+client can disconnect, install the fixed build and reboot the Mac to discard
+stale per-boot interface/PF state and orphaned PF reference tokens. Re-enable
+sharing if an older ambiguous pause marker was preserved. A reboot is deliberately
+not initiated by the dashboard.
 
 For manual recovery, stop the launch daemon before taking its exclusive lock:
 

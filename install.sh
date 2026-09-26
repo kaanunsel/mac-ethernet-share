@@ -142,7 +142,8 @@ fi
 /bin/chmod 644 "$plist" "$newsyslog"
 
 if [[ $first_install -eq 1 ]]; then
-  /usr/sbin/sysctl -n kern.boottime > "$state_directory/paused"
+  boot_uuid=$(/usr/sbin/sysctl -n kern.bootsessionuuid)
+  /usr/bin/printf 'uuid:%s\n' "$(/usr/bin/printf '%s' "$boot_uuid" | /usr/bin/tr '[:upper:]' '[:lower:]')" > "$state_directory/paused"
   /usr/sbin/chown root:wheel "$state_directory/paused"
   /bin/chmod 600 "$state_directory/paused"
 fi

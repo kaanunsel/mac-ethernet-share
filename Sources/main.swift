@@ -298,8 +298,38 @@ func forwardingValue() throws -> Int {
     return value
 }
 
+// kern.boottime is wall-clock-derived: even its microseconds change during one
+// boot. A clock correction must not make cleanup abandon live interface/PF state.
 func bootID() throws -> String {
-    try run("/usr/sbin/sysctl", ["-n", "kern.boottime"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    let raw = try run("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"])
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let uuid = UUID(uuidString: raw) else {
+        throw Failure("Cannot read a valid kernel boot-session UUID")
+    }
+    return "uuid:" + uuid.uuidString.lowercased()
+}
+
+enum BootRelationship { case same, previous, unknown }
+
+func legacyBootSeconds(_ identifier: String) -> Int64? {
+    // Accept the exact sysctl timeval format emitted by previous releases, without
+    // treating a localized date suffix or microsecond clock adjustment as identity.
+    let pattern = #"^\{ sec = ([0-9]+), usec = [0-9]+ \}"#
+    guard let expression = try? NSRegularExpression(pattern: pattern),
+          let match = expression.firstMatch(in: identifier, range: NSRange(identifier.startIndex..., in: identifier)),
+          let range = Range(match.range(at: 1), in: identifier) else { return nil }
+    return Int64(identifier[range])
+}
+
+func bootRelationship(_ recorded: String, current: String) throws -> BootRelationship {
+    if recorded.hasPrefix("uuid:"), let uuid = UUID(uuidString: String(recorded.dropFirst(5))) {
+        return "uuid:" + uuid.uuidString.lowercased() == current ? .same : .previous
+    }
+    guard let seconds = legacyBootSeconds(recorded) else { return .unknown }
+    let legacyNow = try run("/usr/sbin/sysctl", ["-n", "kern.boottime"])
+    // An old wall-clock record cannot reliably prove a reboot if its seconds
+    // differ. Preserve it for explicit recovery instead of silently losing intent.
+    return legacyBootSeconds(legacyNow) == seconds ? .same : .unknown
 }
 
 func pauseForCurrentBoot() throws {
@@ -325,6 +355,15 @@ func pausedForCurrentBoot() -> Bool {
         return true
     }
     do {
+        switch try bootRelationship(marker, current: current) {
+        case .same:
+            try pauseForCurrentBoot()
+            return true
+        case .unknown:
+            // An ambiguous legacy marker stays paused until an explicit start.
+            return true
+        case .previous: break
+        }
         try fm.removeItem(atPath: pausedPath)
         log("Expired manual pause from an earlier boot; automatic sharing enabled.")
         return false
@@ -399,8 +438,10 @@ func start(_ interface: String) throws {
 // Attempt every cleanup step even when one fails. Retain the journal for retries.
 func cleanup(sleepAfter: Bool) throws {
     guard let state = try loadState() else { return }
-    let sameBoot = try bootID() == state.boot
-    var errors: [String] = []
+    let relationship = try bootRelationship(state.boot, current: bootID())
+    let sameBoot = relationship == .same
+    var errors: [String] = relationship == .unknown
+        ? ["Legacy recovery journal has an uncertain boot identity; network state and journal retained for explicit recovery."] : []
     func attempt(_ operation: () throws -> Void) {
         do { try operation() } catch { errors.append(String(describing: error)) }
     }
@@ -708,7 +749,8 @@ func recoveryTests() throws {
     var rules = false
     var token = false
     var ignoredForwardRestores = 0
-    var currentBoot = "boot-one"
+    var currentBoot = "00000000-0000-4000-8000-000000000001"
+    var legacyTime = "{ sec = 1000, usec = 100000 } example date"
     commandOverride = { path, args, input in
         let call = path + " " + args.joined(separator: " ")
         calls.append(call)
@@ -717,7 +759,8 @@ func recoveryTests() throws {
         case "/sbin/pfctl -sn": return "nat-anchor \"com.apple/*\" all\n"
         case "/sbin/pfctl -sr": return "anchor \"com.apple/*\" all\n"
         case "/usr/sbin/sysctl -n net.inet.ip.forwarding": return String(forward)
-        case "/usr/sbin/sysctl -n kern.boottime": return currentBoot
+        case "/usr/sbin/sysctl -n kern.bootsessionuuid": return currentBoot
+        case "/usr/sbin/sysctl -n kern.boottime": return legacyTime
         case "/usr/bin/pmset -g": return "System-wide power settings:\n SleepDisabled \(sleep)\n"
         case "/usr/sbin/netstat -rn -f inet": return "default 192.168.32.1 en0\n"
         case "/sbin/ifconfig en9": return ip ? "inet 192.168.2.1 netmask 0xffffff00" : "inet 169.254.1.2 netmask 0xffff0000"
@@ -744,6 +787,52 @@ func recoveryTests() throws {
         return ""
     }
     func assert(_ value: Bool, _ message: String) throws { if !value { throw Failure(message) } }
+    // Regression: wall-clock corrections while the PS5 switches off must not
+    // turn same-boot cleanup into the previous-boot branch and discard its journal.
+    try start("en9")
+    legacyTime = "{ sec = 1000, usec = 999999 } different date text"
+    try cleanup(sleepAfter: false)
+    try assert(!ip && !rules && !token && forward == 0 && !fm.fileExists(atPath: statePath), "Microsecond clock drift must fully clean a UUID session")
+    try start("en9")
+    legacyTime = "{ sec = 2000, usec = 1 } wall-clock correction"
+    try cleanup(sleepAfter: false)
+    try assert(!ip && !rules && !token && forward == 0, "Whole-second clock corrections must not change boot identity")
+    try start("en9")
+    var oldClockRecord = try loadState()!
+    oldClockRecord.boot = "{ sec = 2000, usec = 777777 } original date text"
+    try save(oldClockRecord)
+    try cleanup(sleepAfter: false)
+    try assert(!ip && !rules && !token && forward == 0, "Legacy same-second records must ignore microsecond drift")
+    try start("en9")
+    var ambiguousRecord = try loadState()!
+    ambiguousRecord.boot = "{ sec = 999, usec = 111111 } uncertain old boot"
+    ambiguousRecord.sleepChanged = true
+    try save(ambiguousRecord)
+    sleep = 1
+    let uncertainCount = calls.count
+    var rejectedAmbiguous = false
+    do { try cleanup(sleepAfter: false) } catch { rejectedAmbiguous = true }
+    try assert(rejectedAmbiguous && fm.fileExists(atPath: statePath) && ip && rules && token && sleep == 0, "Ambiguous legacy identity must retain network intent but restore persistent sleep")
+    try assert(!calls.dropFirst(uncertainCount).contains { $0.contains("pfctl") || $0.contains("ifconfig") || $0.contains("-w net.inet") }, "Ambiguous legacy identity must not mutate per-boot network state")
+    ambiguousRecord.boot = try bootID()
+    try save(ambiguousRecord)
+    try cleanup(sleepAfter: false)
+    let validBoot = currentBoot
+    currentBoot = "invalid-kernel-response"
+    var rejectedInvalidBoot = false
+    do { _ = try bootID() } catch { rejectedInvalidBoot = true }
+    try assert(rejectedInvalidBoot, "Invalid boot identity must fail closed")
+    currentBoot = validBoot
+    try pauseForCurrentBoot()
+    legacyTime = "{ sec = 2001, usec = 2 } another correction"
+    try assert(pausedForCurrentBoot(), "Clock correction must not expire a UUID pause")
+    try Data("{ sec = 2001, usec = 900000 } old marker\n".utf8).write(to: URL(fileURLWithPath: pausedPath))
+    try assert(pausedForCurrentBoot(), "Legacy pause must survive microsecond drift")
+    try assert(try String(contentsOfFile: pausedPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) == bootID(), "Legacy pause must migrate to UUID")
+    try Data("{ sec = 123, usec = 1 } uncertain marker\n".utf8).write(to: URL(fileURLWithPath: pausedPath))
+    try assert(pausedForCurrentBoot() && fm.fileExists(atPath: pausedPath), "Ambiguous pause must stay paused for explicit start")
+    try fm.removeItem(atPath: pausedPath)
+    print("Passed: stable boot identity, microsecond/whole-second clock drift, legacy journal/pause migration, ambiguous-record retention.")
     try start("en9")
     try assert(ip && rules && token && forward == 1 && sleep == 0, "Network startup must not own power policy")
     try cleanup(sleepAfter: false)
@@ -814,7 +903,7 @@ func recoveryTests() throws {
     legacy.sleepChanged = true
     try save(legacy)
     sleep = 1
-    currentBoot = "boot-two"
+    currentBoot = "00000000-0000-4000-8000-000000000002"
     testMatchingAdapter = nil
     let rebootCount = calls.count
     try cleanup(sleepAfter: false)
@@ -824,11 +913,11 @@ func recoveryTests() throws {
     try assert(!calls.contains { $0 == "/sbin/pfctl -d" || $0.hasPrefix("/sbin/pfctl -f") }, "Global PF mutation")
     try pauseForCurrentBoot()
     try assert(pausedForCurrentBoot(), "Manual pause must apply during the current boot")
-    currentBoot = "boot-three"
+    currentBoot = "00000000-0000-4000-8000-000000000003"
     try assert(!pausedForCurrentBoot() && !fm.fileExists(atPath: pausedPath), "Manual pause must expire after reboot")
     try Data().write(to: URL(fileURLWithPath: pausedPath))
     try assert(pausedForCurrentBoot(), "Legacy empty pause marker must be honored during migration")
-    try assert((try String(contentsOfFile: pausedPath, encoding: .utf8)).contains("boot-three"), "Legacy pause marker was not migrated")
+    try assert((try String(contentsOfFile: pausedPath, encoding: .utf8)).contains("uuid:" + currentBoot), "Legacy pause marker was not migrated")
     // A global forwarding flag is not proof that our adapter/subnet is occupied.
     ip = false; rules = false; token = false; forward = 1
     let inheritedCount = calls.count
@@ -876,7 +965,7 @@ func recoveryTests() throws {
     do { try restorePower(sleepAfter: false); throw Failure("Missing restoration failure") }
     catch { try assert(fault == nil, "Power restoration failure not exercised") }
     try assert(fm.fileExists(atPath: powerPath), "Failed power restoration must retain journal")
-    currentBoot = "boot-four"
+    currentBoot = "00000000-0000-4000-8000-000000000004"
     try recoverSettings()
     try assert(sleep == 0 && !fm.fileExists(atPath: powerPath), "Power hold must recover across reboot with adapter absent")
     sleep = 1
