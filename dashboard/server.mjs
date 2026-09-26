@@ -175,9 +175,11 @@ async function authorize() {
     "/Library/PrivilegedHelperTools/local.ethernetshare-dashboard";
   const label = `local.ethernetshare.dashboard-management.${uid}`;
   const plist = `/Library/LaunchDaemons/${label}.plist`;
-  const xml = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${label}</string><key>ProgramArguments</key><array><string>${helperDir}/ethernetshared</string><string>dashboard-agent</string><string>${uid}</string></array><key>RunAtLoad</key><false/><key>StandardErrorPath</key><string>/var/log/ethernetshare-dashboard.log</string><key>StandardOutPath</key><string>/var/log/ethernetshare-dashboard.log</string></dict></plist>`;
+  // launchd can reject an ad-hoc signed Swift executable as a direct privileged
+  // helper after reboot. Launch a fixed, root-owned command via Apple's shell.
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${label}</string><key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>exec ${helperDir}/ethernetshared dashboard-agent ${uid}</string></array><key>RunAtLoad</key><false/><key>StandardErrorPath</key><string>/var/log/ethernetshare-dashboard.log</string><key>StandardOutPath</key><string>/var/log/ethernetshare-dashboard.log</string></dict></plist>`;
   await elevated(
-    `set -e\ncd ${quote(root)}\n/bin/bash install.sh\n/usr/bin/install -d -o root -g wheel -m 755 ${helperDir}\n/usr/bin/install -o root -g wheel -m 755 .build/ethernetshared ${helperDir}/ethernetshared\n/usr/bin/printf %s ${quote(xml)} > ${plist}\n/bin/chmod 644 ${plist}\n/usr/sbin/chown root:wheel ${plist}\n/bin/launchctl bootstrap system ${plist} 2>/dev/null || true\n/bin/launchctl kickstart system/${label}`,
+    `set -e\ncd ${quote(root)}\n/bin/bash install.sh\n/bin/launchctl bootout system/${label} 2>/dev/null || true\n/usr/bin/install -d -o root -g wheel -m 755 ${helperDir}\n/usr/bin/install -o root -g wheel -m 755 .build/ethernetshared ${helperDir}/ethernetshared.next\n/bin/mv -f ${helperDir}/ethernetshared.next ${helperDir}/ethernetshared\n/usr/bin/printf %s ${quote(xml)} > ${plist}\n/bin/chmod 644 ${plist}\n/usr/sbin/chown root:wheel ${plist}\n/bin/launchctl bootstrap system ${plist}\n/bin/launchctl kickstart system/${label}`,
   );
   // Never announce success until the protected bridge actually responds.
   for (let attempt = 0; attempt < 10; attempt++) {
