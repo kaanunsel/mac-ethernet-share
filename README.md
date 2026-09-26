@@ -318,7 +318,8 @@ The dashboard provides:
 - **Configuration:** detected hardware ports, adapter MAC and upstream selection,
   a build-and-install workflow, one-click service update and Mac restart controls,
   and the static settings to enter on the client.
-- **Activity:** the latest 250 service log lines, text/error filters, and export.
+- **Activity:** the latest 250 service events, plain-language descriptions,
+  text/error filters, live updates, expandable raw details, and export.
 - **Diagnostics:** readiness, forwarding, power hold, recovery journal, actual PF
   rules, launchd details, and a JSON export.
 
@@ -346,10 +347,16 @@ The dashboard builds the current source and uses the normal installer. To clear
 old, untracked forwarding state after an update, use **Restart Mac** in the same
 panel and confirm the scheduled restart. Save other work before doing so.
 
+The dashboard offers English and Turkish, System/Light/Dark appearance, and
+context help on network and power terms. Language and theme choices are saved in
+the browser. Opening **View all** starts Activity at the newest events. Status,
+traffic, and protected logs refresh about every two seconds while the dashboard
+is running; raw exported logs retain their original service text.
+
 Traffic is the selected Ethernet interface's byte counters, not a speed test or
 proof of internet reachability. Upload means traffic received **from the client**;
 download means traffic transmitted **to the client**. Totals are since interface
-counter reset. History is sampled every five seconds, kept in memory for up to
+counter reset. History is sampled about every two seconds, kept in memory for up to
 15 minutes, and resets when the dashboard process restarts. No traffic is invented
 for an absent interface. A stale-status notice appears when samples are overdue.
 

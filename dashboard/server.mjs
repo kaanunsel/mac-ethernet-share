@@ -406,7 +406,7 @@ server.on("error", (e) => {
   process.exit(1);
 });
 await collect();
-setInterval(collect, 5000).unref();
+setInterval(collect, 2000).unref();
 for (const signal of ["SIGTERM", "SIGINT"])
   process.on(signal, () => {
     server.close();

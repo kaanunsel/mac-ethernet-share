@@ -1,8 +1,10 @@
-import React, { useEffect, useState } from "react";
-import { Battery, Download, AlertCircle } from "lucide-react";
+import React from "react";
+import { Download, AlertCircle } from "lucide-react";
 import { Panel, Rows } from "./components";
 import { known, download } from "./format";
+import { useI18n } from "./i18n";
 export function Diagnostics({ s }) {
+  const { t } = useI18n();
   return (
     <>
       <div className="bottom-grid">
@@ -21,6 +23,7 @@ export function Diagnostics({ s }) {
               [
                 "IPv4 forwarding",
                 known(s.forwarding === null ? null : s.forwarding === 1),
+                "IPv4 forwarding lets this Mac pass traffic between the Ethernet device and Wi-Fi. NAT translates the device's private address for internet access.",
               ],
             ]}
           />
@@ -30,10 +33,11 @@ export function Diagnostics({ s }) {
             rows={[
               ["Power source", s.ac ? "AC power" : "Battery"],
               ["Lid", s.lidClosed ? "Closed" : "Open"],
-              ["Adapter power hold", known(s.powerHold)],
+              ["Adapter power hold", known(s.powerHold), "The power hold prevents the Mac from sleeping while the selected adapter is attached and automation is enabled, including on battery."],
               [
                 "System sleep disabled",
                 known(s.sleepDisabled === null ? null : s.sleepDisabled === 1),
+                "The power hold prevents the Mac from sleeping while the selected adapter is attached and automation is enabled, including on battery.",
               ],
               [
                 "Recovery journal",
@@ -42,6 +46,7 @@ export function Diagnostics({ s }) {
                     ? "Present"
                     : "No network session"
                   : "Unavailable",
+                "The recovery journal records which network settings the service changed so it can restore them safely after stopping or rebooting.",
               ],
               [
                 "Original forwarding",
@@ -68,17 +73,17 @@ export function Diagnostics({ s }) {
           }
         >
           <Download size={16} />
-          Export diagnostics
+          {t("Export diagnostics")}
         </button>
         <span className="quiet">
-          Exports include local IP addresses, adapter MACs, and service logs.
+          {t("Exports include local IP addresses, adapter MACs, and service logs.")}
         </span>
       </div>
       {s.errors.length > 0 && (
         <div className="notice error">
           <AlertCircle size={18} />
           <div>
-            <strong>Some system checks could not be read</strong>
+            <strong>{t("Some system checks could not be read")}</strong>
             {s.errors.map((e, i) => (
               <p key={i}>{e}</p>
             ))}
@@ -92,7 +97,7 @@ export function Diagnostics({ s }) {
         ["Power details", s.power],
       ].map(([title, text]) => (
         <Panel key={title} title={title} className="raw-panel">
-          <pre>{text ?? "Enable management to read this protected state."}</pre>
+          <pre>{text ?? t("Enable management to read this protected state.")}</pre>
         </Panel>
       ))}
     </>

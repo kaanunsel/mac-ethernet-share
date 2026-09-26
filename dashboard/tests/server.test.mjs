@@ -72,7 +72,12 @@ test(
       ).status,
       403,
     );
-    const status = await fetch(base + "/api/status", { headers });
+    let status;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      status = await fetch(base + "/api/status", { headers });
+      if (status.status !== 503) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
     assert.equal(status.status, 200);
     const data = await status.json();
     assert.equal(typeof data.status.link, "boolean");

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   Wifi,
   Laptop,
@@ -15,15 +15,17 @@ import {
   Download,
   AlertCircle,
 } from "lucide-react";
-import { Badge, Panel, Rows, ActivityList } from "./components";
+import { Panel, Rows, ActivityList, Help } from "./components";
 import { known, fmt, bytes, untracked } from "./format";
+import { useI18n } from "./i18n";
 function ConnectionMap({ s }) {
+  const { t } = useI18n();
   return (
     <Panel
       title="Connection path"
       extra={
         <span className="quiet map-caption">
-          Wi-Fi internet shared to Ethernet client
+          {t("Internet path from Wi-Fi to Ethernet client")} <Help text="The network connection travels from Mac Wi-Fi through this Mac to the Ethernet device." />
         </span>
       }
       className="connection-panel"
@@ -34,44 +36,44 @@ function ConnectionMap({ s }) {
             <Wifi />
           </div>
           <h3>
-            Wi-Fi <span>(upstream)</span>
+            {t("Wi-Fi")} <span>({t("upstream")})</span>
           </h3>
           <span>{s.configuration.upstreamInterface}</span>
-          <code>{s.upstreamAddresses.join(", ") || "No IPv4 address"}</code>
+          <code>{s.upstreamAddresses.join(", ") || t("No IPv4 address")}</code>
         </div>
         <div className={`connection-line ${s.upstream ? "connected" : ""}`}>
-          <span>{s.upstream ? "Connected" : "Unavailable"}</span>
+          <span>{t(s.upstream ? "Connected" : "Unavailable")}</span>
         </div>
         <div className={`network-node ${s.sharing ? "connected" : ""}`}>
           <div className="node-icon">
             <Laptop />
           </div>
-          <h3>This Mac</h3>
+          <h3>{t("This Mac")}</h3>
           <span>
             {s.paused
-              ? "Automation paused"
+              ? t("Automation paused")
               : s.managed
-                ? "Automation " + known(!s.paused).toLowerCase()
-                : "Monitoring"}
+                ? t("Automation enabled")
+                : t("Monitoring")}
           </span>
           <code>{s.configuration.gateway}</code>
         </div>
         <div className={`connection-line ${s.link ? "connected" : ""}`}>
-          <span>{s.link ? "Link up" : "Link down"}</span>
+          <span>{t(s.link ? "Link up" : "Link down")}</span>
         </div>
         <div className={`network-node ${s.link ? "connected" : ""}`}>
           <div className="node-icon">
             <EthernetPort />
           </div>
-          <h3>Ethernet client</h3>
+          <h3>{t("Ethernet client")}</h3>
           <span>
             {s.adapter
-              ? `${s.adapter} · ${s.link ? "Link connected" : "Cable disconnected"}`
-              : "Adapter not detected"}
+              ? `${s.adapter} · ${t(s.link ? "Link connected" : "Cable disconnected")}`
+              : t("Adapter not detected")}
           </span>
           <code>
             {s.configuration.clientIP}{" "}
-            <span className="quiet">(configured)</span>
+            <span className="quiet">({t("configured")})</span>
           </code>
         </div>
       </div>
@@ -79,6 +81,7 @@ function ConnectionMap({ s }) {
   );
 }
 function Metrics({ s }) {
+  const { t } = useI18n();
   const battery = s.power?.match(/(\d+%);\s*([^;]+)/);
   const metrics = [
     [
@@ -109,39 +112,45 @@ function Metrics({ s }) {
       "Download (to client)",
       <ArrowDown />,
       `${fmt(s.traffic.rate?.download)} Mbps`,
-      `${bytes(s.traffic.totals?.tx)} since interface reset`,
+      t("{bytes} since interface reset", { bytes: bytes(s.traffic.totals?.tx) === "Unavailable" ? t("Unavailable") : bytes(s.traffic.totals?.tx) }),
     ],
     [
       "Upload (from client)",
       <ArrowUp />,
       `${fmt(s.traffic.rate?.upload)} Mbps`,
-      `${bytes(s.traffic.totals?.rx)} since interface reset`,
+      t("{bytes} since interface reset", { bytes: bytes(s.traffic.totals?.rx) === "Unavailable" ? t("Unavailable") : bytes(s.traffic.totals?.rx) }),
     ],
     [
       "Power source",
       s.ac ? <Plug /> : <Battery />,
       s.ac ? "AC power" : "Battery",
       battery
-        ? `Battery ${battery[1]} · ${battery[2]}`
+        ? t("Battery {percent}% · {state}", { percent: battery[1].replace("%", ""), state: t(battery[2]) })
         : "Power details unavailable",
     ],
   ];
   return (
-    <section className="metrics" aria-label="Live connection metrics">
-      {metrics.map(([label, icon, value, sub]) => (
+    <section className="metrics" aria-label={t("Live connection metrics")}>
+      {metrics.map(([label, icon, value, sub], index) => (
         <div className="metric" key={label}>
-          <p>{label}</p>
+          <p>{t(label)} <Help text={[
+            "This shows whether your Mac is currently providing internet to the Ethernet device. All connection checks must pass before sharing starts.",
+            "Download is data sent from the internet to the Ethernet device, such as a PS5 game download. This is measured on the Ethernet adapter.",
+            "Upload is data sent from the Ethernet device to the internet. This is measured on the Ethernet adapter.",
+            "Shows whether the Mac is using its battery or charger. Sharing continues on battery while the adapter remains connected, but uses battery power.",
+          ][index]} /></p>
           <div className="metric-value">
             {icon}
-            <strong>{value}</strong>
+            <strong>{t(value)}</strong>
           </div>
-          <small>{sub}</small>
+          <small>{t(sub)}</small>
         </div>
       ))}
     </section>
   );
 }
 function Traffic({ s }) {
+  const { t, locale } = useI18n();
   const [minutes, setMinutes] = useState(5);
   const now = Date.now(),
     points = s.traffic.history.filter((p) => now - p.time <= minutes * 60000),
@@ -167,20 +176,20 @@ function Traffic({ s }) {
         <div className="chart-tools">
           <span className="legend">
             <i />
-            Download
+            {t("Download")}
           </span>
           <span className="legend blue">
             <i />
-            Upload
+            {t("Upload")}
           </span>
           <select
-            aria-label="Traffic time range"
+            aria-label={t("Traffic time range")}
             value={minutes}
             onChange={(e) => setMinutes(Number(e.target.value))}
           >
-            <option value={1}>Last minute</option>
-            <option value={5}>Last 5 minutes</option>
-            <option value={15}>Last 15 minutes</option>
+            <option value={1}>{t("Last minute")}</option>
+            <option value={5}>{t("Last 5 minutes")}</option>
+            <option value={15}>{t("Last 15 minutes")}</option>
           </select>
         </div>
       }
@@ -189,7 +198,7 @@ function Traffic({ s }) {
         <svg
           viewBox="0 0 775 226"
           role="img"
-          aria-label={`Ethernet traffic over the last ${minutes} minutes in megabits per second`}
+          aria-label={t("Ethernet traffic over the last {minutes} minutes in megabits per second", { minutes })}
         >
           {[0, 1, 2, 3, 4].map((i) => (
             <g key={i}>
@@ -216,7 +225,7 @@ function Traffic({ s }) {
               />
               <text x={60 + i * 138} y="215" textAnchor="middle">
                 {new Date(now - (5 - i) * minutes * 12000).toLocaleTimeString(
-                  [],
+                  locale === "tr" ? "tr-TR" : "en-US",
                   { hour: "2-digit", minute: "2-digit" },
                 )}
               </text>
@@ -231,35 +240,35 @@ function Traffic({ s }) {
         {valid.length < 2 && (
           <div className="chart-empty">
             {s.adapter
-              ? "Collecting live interface samples…"
-              : "Connect the adapter to see traffic."}
+              ? t("Collecting live interface samples…")
+              : t("Connect the adapter to see traffic.")}
           </div>
         )}
       </div>
       <p className="chart-note">
-        Ethernet interface traffic · sampled every 5 seconds · history retained
-        while the dashboard runs
+        {t("Ethernet interface traffic · sampled every 2 seconds · history retained while the dashboard runs")} <Help text="This chart shows current download and upload speeds between the Mac and Ethernet device. It does not directly test internet reachability." />
       </p>
     </Panel>
   );
 }
 function Controls({ s, busy, act }) {
+  const { t } = useI18n();
   return (
     <Panel title="Service controls" className="control-panel">
       <div className="automation">
         <div>
-          <h3>Automation</h3>
+          <h3>{t("Automation")} <Help text="Automation starts sharing when the adapter, cable, and Wi-Fi are ready. Pausing it stops automatic sharing until resumed or the Mac restarts." /></h3>
           <p>
             {s.managed
               ? s.paused
-                ? "Paused until resume or reboot"
-                : "Starts when the connection is ready"
-              : "Administrator access required"}
+                ? t("Paused until resume or reboot")
+                : t("Starts when the connection is ready")
+              : t("Administrator access required")}
           </p>
         </div>
         <span
           className={`switch ${s.managed && !s.paused ? "on" : ""}`}
-          aria-label={`Automation ${s.managed ? known(!s.paused) : "unknown"}`}
+          aria-label={`${t("Automation")} ${s.managed ? t(known(!s.paused)) : t("unknown")}`}
         >
           <i />
         </span>
@@ -272,24 +281,24 @@ function Controls({ s, busy, act }) {
             onClick={() => act(s.paused ? "start" : "stop")}
           >
             {s.paused ? <Play size={18} /> : <Pause size={18} />}{" "}
-            {untracked(s)
+            {t(untracked(s)
               ? s.paused
                 ? "Resume automation"
                 : "Pause automation"
               : s.paused
                 ? "Resume sharing"
-                : "Pause sharing"}
+                : "Pause sharing")}
           </button>
           <button
             className="secondary full"
             disabled={busy || Boolean(s.adapter)}
             title={
-              s.adapter ? "Unplug the adapter before restarting" : undefined
+              s.adapter ? t("Unplug the adapter before restarting") : undefined
             }
             onClick={() => act("restart")}
           >
             <RefreshCw size={17} />
-            Restart service
+            {t("Restart service")}
           </button>
         </>
       ) : (
@@ -299,18 +308,19 @@ function Controls({ s, busy, act }) {
           onClick={() => act("authorize")}
         >
           <LockKeyhole size={17} />
-          Enable management
+          {t("Enable management")}
         </button>
       )}
       <p className="control-note">
-        {s.managed
+        {t(s.managed
           ? "To recover connectivity, unplug the Ethernet adapter before restarting the service."
-          : "Approve the macOS administrator prompt to control sharing and read protected service state. This upgrades the service and may briefly interrupt sharing."}
+          : "Approve the macOS administrator prompt to control sharing and read protected service state. This upgrades the service and may briefly interrupt sharing.")}
       </p>
     </Panel>
   );
 }
 export function Overview({ s, busy, act, navigate }) {
+  const { t } = useI18n();
   const adapter = s.ports.find((p) => p.interface === s.adapter);
   return (
     <>
@@ -319,14 +329,10 @@ export function Overview({ s, busy, act, navigate }) {
           <AlertCircle size={19} />
           <div>
             <strong>
-              Forwarding is present, but its recovery record is missing.
+              {t("Forwarding is present, but its recovery record is missing.")}
             </strong>
             <p>
-              Your client may still have internet access. Existing NAT rules and
-              IPv4 forwarding are active, but the daemon cannot safely claim
-              this session. Pausing automation will not clear these untracked
-              rules. Keep the connection running; investigate recovery when the
-              client is idle.
+              {t("Your client may still have internet access. Existing NAT rules and IPv4 forwarding are active, but the daemon cannot safely claim this session. Pausing automation will not clear these untracked rules. Keep the connection running; investigate recovery when the client is idle.")}
             </p>
           </div>
         </div>
@@ -341,10 +347,10 @@ export function Overview({ s, busy, act, navigate }) {
         <Panel title="Connection details">
           <Rows
             rows={[
-              ["Adapter (Ethernet)", adapter?.name || "Not detected"],
-              ["Upstream interface", s.configuration.upstreamInterface],
-              ["Gateway", s.configuration.gateway],
-              ["Client address", s.configuration.clientIP],
+              ["Adapter (Ethernet)", adapter?.name || "Not detected", "The adapter's MAC address uniquely identifies the Ethernet hardware so the service can find it even when macOS changes its en-number."],
+              ["Upstream interface", s.configuration.upstreamInterface, "The upstream is the Mac network interface that supplies internet, normally Wi-Fi (en0)."],
+              ["Gateway", s.configuration.gateway, "The gateway is this Mac's Ethernet address. Set it as the router or default gateway on your PS5."],
+              ["Client address", s.configuration.clientIP, "The client address is the static IP you enter on the Ethernet device, such as your PS5."],
             ]}
           />
         </Panel>
@@ -355,7 +361,7 @@ export function Overview({ s, busy, act, navigate }) {
               className="text-button"
               onClick={() => navigate("activity")}
             >
-              View all <ChevronRight size={14} />
+              {t("View all")} <ChevronRight size={14} />
             </button>
           }
         >

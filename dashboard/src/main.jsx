@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Network,
@@ -24,6 +24,7 @@ import { Overview } from "./Overview";
 import { Configuration } from "./Configuration";
 import { ActivityPage } from "./Activity";
 import { Diagnostics } from "./Diagnostics";
+import { I18nProvider, useI18n } from "./i18n";
 const nav = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "configuration", label: "Configuration", icon: Settings2 },
@@ -40,6 +41,7 @@ const titles = {
   diagnostics: ["Diagnostics", "The details behind your connection."],
 };
 function App() {
+  const { t, locale, setLocale } = useI18n();
   const [page, setPage] = useState(() =>
       nav.some((n) => n.id === location.hash.slice(1))
         ? location.hash.slice(1)
@@ -49,7 +51,17 @@ function App() {
     [error, setError] = useState(null),
     [busy, setBusy] = useState(false),
     [toast, setToast] = useState(null),
-    [loading, setLoading] = useState(true);
+    [loading, setLoading] = useState(true),
+    [theme, setTheme] = useState(() => localStorage.getItem("ethernetshare-theme") || "system");
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => { document.documentElement.dataset.theme = theme === "system" ? (media.matches ? "dark" : "light") : theme; };
+    update();
+    media.addEventListener("change", update);
+    localStorage.setItem("ethernetshare-theme", theme);
+    return () => media.removeEventListener("change", update);
+  }, [theme]);
+  useLayoutEffect(() => { window.scrollTo(0, 0); }, [page]);
   async function refresh() {
     try {
       const r = await request("status");
@@ -68,7 +80,7 @@ function App() {
     async function poll() {
       if (!alive) return;
       await refresh();
-      if (alive) timer = setTimeout(poll, 5000);
+      if (alive) timer = setTimeout(poll, 2000);
     }
     poll();
     const handler = () =>
@@ -93,13 +105,14 @@ function App() {
   function navigate(id) {
     location.hash = id;
     setPage(id);
+    window.scrollTo(0, 0);
   }
   async function act(action, body = {}) {
     setBusy(true);
     setError(null);
     try {
       const result = await request("action", { action, ...body });
-      setToast(result.message);
+      setToast(result.message?.trim());
       await refresh();
     } catch (e) {
       setError(e.message);
@@ -119,10 +132,10 @@ function App() {
           <Network />
           <div>
             <strong>Ethernet Share</strong>
-            <span>Wi-Fi to Ethernet for Mac</span>
+            <span>{t("Wi-Fi to Ethernet for Mac")}</span>
           </div>
         </a>
-        <nav aria-label="Main navigation">
+        <nav aria-label={t("Main navigation")}>
           {nav.map((n) => (
             <button
               key={n.id}
@@ -131,25 +144,29 @@ function App() {
               onClick={() => navigate(n.id)}
             >
               <n.icon size={20} />
-              {n.label}
+              {t(n.label)}
             </button>
           ))}
         </nav>
+        <div className="display-controls">
+          <label>{t("Language")}<select aria-label={t("Language")} value={locale} onChange={(e) => setLocale(e.target.value)}><option value="en">English</option><option value="tr">Türkçe</option></select></label>
+          <label>{t("Theme")}<select aria-label={t("Theme")} value={theme} onChange={(e) => setTheme(e.target.value)}><option value="system">{t("System")}</option><option value="light">{t("Light")}</option><option value="dark">{t("Dark")}</option></select></label>
+        </div>
         <div className="sidebar-footer">
           <div>
             <span className={`dot ${error ? "warning" : ""}`} />
-            <span>Local workspace</span>
+            <span>{t("Local workspace")}</span>
             <ChevronRight size={15} />
           </div>
           <a href="http://127.0.0.1:3847">127.0.0.1:3847</a>
           <small>
             {s?.managed ? (
               <>
-                <ShieldCheck size={13} /> Management enabled
+                <ShieldCheck size={13} /> {t("Management enabled")}
               </>
             ) : (
               <>
-                <LockKeyhole size={13} /> Monitor mode
+                <LockKeyhole size={13} /> {t("Monitor mode")}
               </>
             )}
           </small>
@@ -158,29 +175,29 @@ function App() {
       <main>
         <header className="page-header">
           <div>
-            <h1>{titles[page][0]}</h1>
-            <p>{titles[page][1]}</p>
+            <h1>{t(titles[page][0])}</h1>
+            <p>{t(titles[page][1])}</p>
           </div>
           <div className="header-status">
             <div>
               <Badge good={Boolean(s && !error && !stale && s.sharing)}>
                 {busy
-                  ? "Applying changes…"
+                  ? t("Applying changes…")
                   : error || stale
-                    ? "Status unavailable"
+                    ? t("Status unavailable")
                     : s
-                      ? stateLabel(s)
-                      : "Connecting…"}
+                      ? t(stateLabel(s))
+                      : t("Connecting…")}
               </Badge>
               <small>
                 {s
-                  ? `Updated ${new Date(s.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
-                  : "Connecting to local service"}
+                  ? t("Updated {time}", { time: new Date(s.timestamp).toLocaleTimeString(locale === "tr" ? "tr-TR" : "en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })
+                  : t("Connecting to local service")}
               </small>
             </div>
             <button
               className="icon-button"
-              aria-label="Refresh status"
+              aria-label={t("Refresh status")}
               disabled={busy}
               onClick={() => act("refresh")}
             >
@@ -192,12 +209,12 @@ function App() {
           <div className="notice error" role="alert">
             <AlertCircle size={19} />
             <div>
-              <strong>Unable to complete the request</strong>
+              <strong>{t("Unable to complete the request")}</strong>
               <p>{error}</p>
             </div>
             <button
               className="icon-button"
-              aria-label="Dismiss error"
+              aria-label={t("Dismiss error")}
               onClick={() => setError(null)}
             >
               <X size={16} />
@@ -206,9 +223,7 @@ function App() {
         )}
         {stale && (
           <div className="notice">
-            The last status is stale. Displayed values are from{" "}
-            {new Date(s.timestamp).toLocaleTimeString()}; checking for an
-            update.
+            {t("The last status is stale. Displayed values are from {time}; checking for an update.", { time: new Date(s.timestamp).toLocaleTimeString(locale === "tr" ? "tr-TR" : "en-US") })}
           </div>
         )}
         {!s ? (
@@ -216,12 +231,12 @@ function App() {
             <LoaderCircle className="spin" />
             <h2>
               {loading
-                ? "Connecting to your Mac…"
-                : "Waiting for the local service"}
+                ? t("Connecting to your Mac…")
+                : t("Waiting for the local service")}
             </h2>
-            <p>Reading network interfaces and service status.</p>
+            <p>{t("Reading network interfaces and service status.")}</p>
             <button className="secondary" onClick={refresh}>
-              Try again
+              {t("Try again")}
             </button>
           </div>
         ) : (
@@ -247,7 +262,7 @@ function App() {
         <footer className="page-footer">
           <span>
             <ShieldCheck size={13} />
-            Local to this Mac · no cloud connection
+            {t("Local to this Mac · no cloud connection")}
           </span>
           <span>Mac Ethernet Share</span>
         </footer>
@@ -255,11 +270,11 @@ function App() {
       {toast && (
         <div className="toast" role="status">
           <Check size={18} />
-          {toast}
+          {t(toast)}
           <button
             className="icon-button"
             onClick={() => setToast(null)}
-            aria-label="Dismiss notification"
+            aria-label={t("Dismiss notification")}
           >
             <X size={16} />
           </button>
@@ -268,11 +283,10 @@ function App() {
       {busy && (
         <div className="operation-status" role="status">
           <LoaderCircle className="spin" size={17} />
-          Working… If macOS requests authorization, approve its administrator
-          prompt.
+          {t("Working… If macOS requests authorization, approve its administrator prompt.")}
         </div>
       )}
     </div>
   );
 }
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(<I18nProvider><App /></I18nProvider>);
