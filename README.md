@@ -93,9 +93,31 @@ routes are not comprehensively detected.
 ```bash
 ./ethernet-share.sh start   # Enable automatic sharing
 ./ethernet-share.sh stop    # Pause until start or the next reboot
+./ethernet-share.sh restart # Unplug adapter, recover settings, restart the daemon
 ./ethernet-share.sh status  # Inspect adapter, upstream, power, pause, and PF state
 ./ethernet-share.sh logs    # Follow the last 100 log lines; Ctrl+C to exit
 ```
+
+For the shorter `ethernetshare <command>` form, add an alias to `~/.zshrc`
+using the absolute path to your checkout:
+
+```bash
+alias ethernetshare='/absolute/path/to/mac-ethernet-share/ethernet-share.sh'
+```
+
+Reload with `source ~/.zshrc` or open a new terminal, then use:
+
+```bash
+ethernetshare logs
+ethernetshare restart
+ethernetshare start
+ethernetshare stop
+ethernetshare status
+```
+
+Replace any older `ethernetshare` alias that appended `start`. This alias only
+changes command access; automatic sharing and manual pause/resume behavior stay
+the same. Without a subcommand, `ethernetshare` displays status.
 
 Sharing starts when the selected adapter is present, its Ethernet link is up, the
 configured upstream is primary and has a non-link-local IPv4 address, and automation
@@ -109,13 +131,18 @@ USB accessory permission, or Wi-Fi authentication may require user interaction.
 
 ## Power and network behavior
 
-- While sharing, the daemon uses the undocumented, system-wide `pmset disablesleep`
+- While the selected adapter is attached and automation is enabled, the daemon uses
+  the system-wide `pmset disablesleep`
   setting to keep the Mac awake, including with the lid closed. It restores the
-  previous value on cleanup. Display sleep and other power settings are unchanged.
+  previous value on removal or manual stop. This works on battery and AC, even
+  before the Ethernet link or Wi-Fi is ready and if network startup fails.
+  Display sleep and other power settings are unchanged.
   Battery sharing can drain the battery; keep the Mac on a ventilated surface and
   disconnect the adapter before putting it in a bag.
-- Removing the adapter or losing connectivity restores settings. If the lid is
-  closed, the daemon then requests sleep. No wake timers are installed.
+- Removing the adapter or pausing restores the previous sleep setting. If the lid
+  is closed and sleep was previously enabled, the daemon then requests sleep.
+  Losing Wi-Fi or the Ethernet link tears down sharing but keeps the Mac awake
+  while the adapter remains attached. No wake timers are installed.
 - A persistent recovery journal records changes before they occur. Startup attempts
   cleanup after a crash; failures retain the journal for retry. Across boots only
   the persistent sleep setting is restored, not stale PF/interface state.
@@ -126,9 +153,12 @@ USB accessory permission, or Wi-Fi authentication may require user interaction.
 - NAT is limited to the client's `/32` address. Incoming traffic from that client to
   the Mac itself is blocked; IPv6 on the downstream interface is blocked. An IP
   address is not authentication. No inbound port forwarding is configured.
-- IPv4 forwarding is global. The daemon refuses to start if it is already enabled.
-  Do not run another router, Internet Sharing service, or this project's older
-  service at the same time. VPN coexistence is not supported.
+- IPv4 forwarding is global. An already-enabled flag is preserved: it does not
+  prove that another service owns the adapter or the downstream subnet. When the
+  daemon enables forwarding itself, it restores the previous value on cleanup.
+  Adapter-address and subnet-route conflict checks still apply. Do not configure
+  another router or Internet Sharing on the same adapter/subnet. VPN coexistence
+  is not supported.
 - Cleanup reads IPv4 forwarding again after all other network teardown actions. If
   the first restoration raced with a network event, it writes the original value
   once more. It does not delete the recovery journal or log `settings-restored=true`
@@ -174,9 +204,23 @@ State is root-only; logs have mode `0600` and rotate at 1 MB with seven compress
 ## Troubleshooting and recovery
 
 Start with `./ethernet-share.sh status` and `./ethernet-share.sh logs`.
-The daemon fails closed when another network configuration owns forwarding, an
-IPv4 address, or the sleep override, or when required PF hooks are unavailable.
-Investigate the existing configuration instead of resetting system-wide settings.
+The daemon refuses to replace an existing adapter IPv4 address or overlapping
+subnet route, or to run without the required PF hooks. Existing global forwarding
+and sleep settings are preserved. The power recovery record is separate from the
+network session, so a failed connection does not release the adapter's sleep hold.
+
+To recover a stuck service, unplug the configured adapter and run:
+
+```bash
+./ethernet-share.sh restart
+```
+
+This stops the launch daemon, waits for its exclusive lock, restores its recorded
+network and power changes, then starts it again. It preserves the pause state;
+run `start` if you had manually paused sharing. It refuses to run with the adapter
+attached. If recovery fails, it retains the journal and leaves the service stopped
+for diagnosis instead of starting over incomplete cleanup. It never blindly
+resets global forwarding or flushes other services' PF rules.
 
 For manual recovery, stop the launch daemon before taking its exclusive lock:
 
@@ -201,7 +245,8 @@ bash tests/check.sh
 
 Checks compile Swift with warnings as errors, validate shell/plist/log formats,
 exercise the child-process helper, and test policy, recovery, partial-start failures,
-cleanup retries, event coalescing, pause expiry, and power-loss recovery using
+inherited forwarding, adapter-based power holds, cleanup retries, restart ordering,
+event coalescing, pause expiry, and power-loss recovery using
 simulated system commands. PF syntax is parsed without loading rules.
 These tests do not install the service or change network/power settings.
 

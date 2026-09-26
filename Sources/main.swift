@@ -19,6 +19,7 @@ var testMatchingAdapter: String? = "en9"
 let directory = "/var/db/ethernetshare"
 #endif
 let statePath = directory + "/state.json"
+let powerPath = directory + "/power.json"
 let receiptPath = directory + "/pf-reference.txt"
 let pausedPath = directory + "/paused"
 let logPath = "/var/log/ethernetshare.log"
@@ -132,10 +133,13 @@ func secureDirectory() throws {
 var lockFD: Int32 = -1
 func acquireLock() throws {
     try secureDirectory()
-    lockFD = open(directory + "/lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
-    guard lockFD >= 0, flock(lockFD, LOCK_EX | LOCK_NB) == 0 else {
+    let fd = open(directory + "/lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { throw Failure("Cannot open service lock") }
+    guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+        close(fd)
         throw Failure("Another ethernetshared process is running. Stop the launch daemon before recovery.")
     }
+    lockFD = fd
 }
 
 struct Snapshot: Codable {
@@ -227,6 +231,7 @@ struct Conditions: Equatable {
     var paused: Bool
     var lidClosed: Bool
     var ready: Bool { interface != nil && link && upstream && !paused }
+    var keepAwake: Bool { interface != nil && !paused }
 }
 
 func conditions() -> Conditions {
@@ -246,6 +251,42 @@ func disabledSleep() throws -> Int {
         if fields.first == "SleepDisabled", fields.count == 2, let value = Int(fields[1]) { return value }
     }
     throw Failure("Cannot read SleepDisabled; refusing to guess the original value.")
+}
+
+struct PowerSnapshot: Codable {
+    let sleepDisabled: Int
+}
+
+func loadPower() throws -> PowerSnapshot? {
+    guard fm.fileExists(atPath: powerPath) else { return nil }
+    let state = try JSONDecoder().decode(PowerSnapshot.self, from: Data(contentsOf: URL(fileURLWithPath: powerPath)))
+    guard [0, 1].contains(state.sleepDisabled) else { throw Failure("Invalid power recovery state") }
+    return state
+}
+
+// Power follows adapter presence, independently of link negotiation, Wi-Fi or NAT.
+// The separate journal survives failed network startup and is restored across boots.
+func holdPower() throws {
+    if try loadPower() == nil {
+        let state = PowerSnapshot(sleepDisabled: try disabledSleep())
+        try JSONEncoder().encode(state).write(to: URL(fileURLWithPath: powerPath), options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: powerPath)
+        log("POWER hold reason=adapter-present policy=AC-or-battery original=\(state.sleepDisabled)")
+    }
+    if try disabledSleep() != 1 { try run("/usr/bin/pmset", ["disablesleep", "1"]) }
+    guard try disabledSleep() == 1 else { throw Failure("macOS did not accept the lid-sleep override") }
+}
+
+func restorePower(sleepAfter: Bool) throws {
+    guard let state = try loadPower() else { return }
+    try run("/usr/bin/pmset", ["disablesleep", String(state.sleepDisabled)])
+    guard try disabledSleep() == state.sleepDisabled else { throw Failure("SleepDisabled restoration did not take effect; power journal retained") }
+    if sleepAfter && state.sleepDisabled == 0 && lidClosed() {
+        log("SLEEP requested reason=adapter-removed-or-paused")
+        try run("/usr/bin/pmset", ["sleepnow"])
+    }
+    try fm.removeItem(atPath: powerPath)
+    log("POWER restored SleepDisabled=\(state.sleepDisabled)")
 }
 
 func forwardingValue() throws -> Int {
@@ -325,9 +366,7 @@ func checkAnchors() throws {
 func start(_ interface: String) throws {
     try checkAnchors()
     let forwarding = try forwardingValue()
-    guard forwarding == 0 else { throw Failure("IPv4 forwarding already enabled; another sharing service or legacy session may own it.") }
     let disabled = try disabledSleep()
-    guard disabled == 0 else { throw Failure("SleepDisabled already enabled; restore the legacy session before enabling automatic sharing.") }
     let current = try run("/sbin/ifconfig", [interface])
     let addresses = current.split(separator: "\n").map { $0.split(whereSeparator: \.isWhitespace) }
     guard !addresses.contains(where: { $0.first == "inet" && $0.count > 1 && !$0[1].hasPrefix("169.254.") }) else {
@@ -340,7 +379,7 @@ func start(_ interface: String) throws {
     }) else { throw Failure("192.168.2.0/24 overlaps an existing route.") }
     let rules = pfRules(interface)
     try run("/sbin/pfctl", ["-a", anchor, "-nf", "-"], input: rules)
-    var state = Snapshot(interface: interface, boot: try bootID(), forwarding: 0, sleepDisabled: disabled)
+    var state = Snapshot(interface: interface, boot: try bootID(), forwarding: forwarding, sleepDisabled: disabled)
     try save(state)
     // Journal intent BEFORE changing any setting. Recovery is safe if an action never ran.
     state.address = true; try save(state)
@@ -350,13 +389,11 @@ func start(_ interface: String) throws {
     let enable = try run("/sbin/pfctl", ["-E"])
     guard let token = parseToken(enable) else { throw Failure("PF enabled but no reference token was returned. Inspect pfctl -s References before retrying.") }
     state.token = token; try save(state)
-    state.forwardingChanged = true; try save(state)
-    try run("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=1"])
-    state.sleepChanged = true; try save(state)
-    // This is system-wide despite -c in the legacy script. It is restored when sharing stops.
-    try run("/usr/bin/pmset", ["disablesleep", "1"])
-    guard try disabledSleep() == 1 else { throw Failure("macOS did not accept the lid-sleep override.") }
-    log("SHARING started interface=\(interface) client=\(clientIP) power-policy=AC-or-battery")
+    if forwarding == 0 {
+        state.forwardingChanged = true; try save(state)
+        try run("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=1"])
+    }
+    log("SHARING started interface=\(interface) client=\(clientIP) forwarding-original=\(forwarding)")
 }
 
 // Attempt every cleanup step even when one fails. Retain the journal for retries.
@@ -471,19 +508,25 @@ func sessionHealthy(_ state: Snapshot, _ status: Conditions) throws -> Bool {
     let address = try run("/sbin/ifconfig", [state.interface])
     let forwarding = try run("/usr/sbin/sysctl", ["-n", "net.inet.ip.forwarding"])
     let nat = try run("/sbin/pfctl", ["-a", anchor, "-sn"])
-    let sleep = try disabledSleep()
     return address.contains("inet \(gateway) ") && forwarding.trimmingCharacters(in: .whitespacesAndNewlines) == "1" &&
-        nat.contains(clientIP) && sleep == 1
+        nat.contains(clientIP)
 }
 
-func reconcilePass() {
-    let status = conditions()
+func reconcilePass(_ status: Conditions) {
     if status != lastConditions {
         log(stateDescription(status))
         lastConditions = status
     }
     if observing { return }
+    // Always release our power override on removal, even if network cleanup fails.
+    defer {
+        if !status.keepAwake {
+            do { try restorePower(sleepAfter: true) }
+            catch { log("ERROR: \(error)") }
+        }
+    }
     do {
+        if status.keepAwake { try holdPower() }
         var healthy = true
         if active, status.ready {
             if let state = try loadState() { healthy = (try? sessionHealthy(state, status)) == true }
@@ -493,11 +536,11 @@ func reconcilePass() {
             active = false
             log("SHARING stop-trigger reason=\(healthy ? stopReasons(status) : "session-drift")")
             if !healthy { cooldown = Date().addingTimeInterval(60) }
-            try cleanup(sleepAfter: true)
+            try cleanup(sleepAfter: false)
         }
         if !active {
             // Startup/crash recovery happens even while paused or adapter absent.
-            if try loadState() != nil { try cleanup(sleepAfter: !status.ready) }
+            if try loadState() != nil { try cleanup(sleepAfter: false) }
             if status.ready, Date() >= cooldown, let interface = status.interface {
                 do {
                     log("SHARING start-trigger reason=all-conditions-ready interface=\(interface)")
@@ -505,7 +548,7 @@ func reconcilePass() {
                     active = true
                 } catch {
                     cooldown = Date().addingTimeInterval(60)
-                    try? cleanup(sleepAfter: true)
+                    try? cleanup(sleepAfter: false)
                     throw error
                 }
             }
@@ -513,8 +556,38 @@ func reconcilePass() {
     } catch { log("ERROR: \(error)") }
 }
 
+func recoverSettings() throws {
+    var errors: [String] = []
+    do { try cleanup(sleepAfter: false) } catch { errors.append(String(describing: error)) }
+    do { try restorePower(sleepAfter: false) } catch { errors.append(String(describing: error)) }
+    if !errors.isEmpty { throw Failure(errors.joined(separator: "; ")) }
+}
+
+func restartService(recover: () throws -> Void) throws {
+    guard matchingAdapter() == nil else { throw Failure("Unplug the configured Ethernet adapter before restart.") }
+    let service = "system/local.ethernetshare"
+    if (try? run("/bin/launchctl", ["print", service])) != nil {
+        try run("/bin/launchctl", ["bootout", service])
+    }
+    // Recovery must finish before bootstrap; never restart over unverified cleanup.
+    try recover()
+    try run("/bin/launchctl", ["enable", service])
+    try run("/bin/launchctl", ["bootstrap", "system", "/Library/LaunchDaemons/local.ethernetshare.plist"])
+    print("Service restarted; pause state preserved. Ready for adapter insertion.")
+}
+
+func recoverStoppedService() throws {
+    // bootout can return before the old process releases its lock.
+    for attempt in 0..<30 {
+        do { try acquireLock(); break }
+        catch { if attempt == 29 { throw error }; Thread.sleep(forTimeInterval: 1) }
+    }
+    defer { close(lockFD); lockFD = -1 }
+    try recoverSettings()
+}
+
 func reconcile() {
-    reconcileGate.perform(reconcilePass)
+    reconcileGate.perform { reconcilePass(conditions()) }
 }
 
 // All callbacks and actions run on the main run loop: no concurrent start/stop.
@@ -531,7 +604,7 @@ func watch() throws {
     if !observing {
         try acquireLock()
         // Restore power settings even if notification registration later fails.
-        try cleanup(sleepAfter: false)
+        try recoverSettings()
     }
     guard let port = IONotificationPortCreate(kIOMainPortDefault),
           let source = IONotificationPortGetRunLoopSource(port)?.takeUnretainedValue() else { throw Failure("Cannot create IOKit notifications") }
@@ -560,7 +633,7 @@ func watch() throws {
         source.setEventHandler {
             if sig == SIGUSR1 { reconcile(); return }
             if !observing {
-                do { try cleanup(sleepAfter: false) }
+                do { try recoverSettings() }
                 catch { log("ERROR: \(error)"); exit(1) }
             }
             exit(0)
@@ -595,6 +668,7 @@ func selfTest() throws {
                            paused: mask & 16 != 0, lidClosed: false)
         let expected = mask & 1 != 0 && mask & 4 != 0 && mask & 8 != 0 && mask & 16 == 0
         try check(c.ready == expected, "Start policy truth table \(mask)")
+        try check(c.keepAwake == (mask & 1 != 0 && mask & 16 == 0), "Adapter power policy truth table \(mask)")
     }
     let original = Snapshot(interface: "en9", boot: "example", forwarding: 0, sleepDisabled: 0, sleepChanged: true)
     let restored = try JSONDecoder().decode(Snapshot.self, from: JSONEncoder().encode(original))
@@ -661,13 +735,17 @@ func recoveryTests() throws {
         case "/usr/bin/pmset disablesleep 1": sleep = 1
         case "/usr/bin/pmset disablesleep 0": sleep = 0
         case "/usr/bin/pmset sleepnow": break
+        case "/bin/launchctl print system/local.ethernetshare",
+             "/bin/launchctl bootout system/local.ethernetshare",
+             "/bin/launchctl enable system/local.ethernetshare",
+             "/bin/launchctl bootstrap system /Library/LaunchDaemons/local.ethernetshare.plist": break
         default: throw Failure("Unexpected test command: \(call)")
         }
         return ""
     }
     func assert(_ value: Bool, _ message: String) throws { if !value { throw Failure(message) } }
     try start("en9")
-    try assert(ip && rules && token && forward == 1 && sleep == 1, "Start did not configure sharing")
+    try assert(ip && rules && token && forward == 1 && sleep == 0, "Network startup must not own power policy")
     try cleanup(sleepAfter: false)
     try assert(!ip && !rules && !token && forward == 0 && sleep == 0, "Normal cleanup failed")
     try start("en9")
@@ -684,7 +762,7 @@ func recoveryTests() throws {
     let count = calls.count
     try cleanup(sleepAfter: false)
     try assert(calls.count == count, "Repeated cleanup must be a no-op")
-    for failure in ["/sbin/ifconfig en9 inet 192.168.2.1 netmask 255.255.255.0 alias", "/sbin/pfctl -a com.apple/ethernetshare -f -", "/sbin/pfctl -E", "/usr/sbin/sysctl -w net.inet.ip.forwarding=1", "/usr/bin/pmset disablesleep 1"] {
+    for failure in ["/sbin/ifconfig en9 inet 192.168.2.1 netmask 255.255.255.0 alias", "/sbin/pfctl -a com.apple/ethernetshare -f -", "/sbin/pfctl -E", "/usr/sbin/sysctl -w net.inet.ip.forwarding=1"] {
         fault = failure
         do { try start("en9"); throw Failure("Fault was not exercised") }
         catch { try assert(fault == nil, "Wrong failure in start") }
@@ -732,6 +810,10 @@ func recoveryTests() throws {
     // the Mac is off, so the next boot gets no removal event. Recovery must restore
     // the persistent sleep override without touching stale per-boot network/PF state.
     try start("en9")
+    var legacy = try loadState()!
+    legacy.sleepChanged = true
+    try save(legacy)
+    sleep = 1
     currentBoot = "boot-two"
     testMatchingAdapter = nil
     let rebootCount = calls.count
@@ -747,7 +829,82 @@ func recoveryTests() throws {
     try Data().write(to: URL(fileURLWithPath: pausedPath))
     try assert(pausedForCurrentBoot(), "Legacy empty pause marker must be honored during migration")
     try assert((try String(contentsOfFile: pausedPath, encoding: .utf8)).contains("boot-three"), "Legacy pause marker was not migrated")
-    print("Passed: start/stop, idempotence, 5 partial-start failures, cleanup retry, closed/open lid, token receipt, boot-scoped pause and critical-battery hibernation/reboot recovery.")
+    // A global forwarding flag is not proof that our adapter/subnet is occupied.
+    ip = false; rules = false; token = false; forward = 1
+    let inheritedCount = calls.count
+    try start("en9")
+    try assert((try loadState())?.forwarding == 1, "Must journal inherited forwarding")
+    try cleanup(sleepAfter: false)
+    try assert(forward == 1 && !calls.dropFirst(inheritedCount).contains { $0.contains("-w net.inet.ip.forwarding") }, "Inherited forwarding must never be written or disabled")
+    forward = 0
+
+    var status = Conditions(interface: "en9", ac: false, link: false, upstream: false, paused: false, lidClosed: true)
+    testLidClosed = true
+    reconcilePass(status)
+    try assert(sleep == 1 && !active && fm.fileExists(atPath: powerPath), "Battery + adapter must hold power before link or Wi-Fi is ready")
+    status.link = true; status.upstream = true
+    fault = "/sbin/pfctl -E"
+    reconcilePass(status)
+    try assert(fault == nil && !active && sleep == 1 && !fm.fileExists(atPath: statePath), "Network startup failure must not release adapter power hold")
+    cooldown = .distantPast
+    reconcilePass(status)
+    try assert(active && sleep == 1, "Sharing must start with adapter power hold already active")
+    status.upstream = false
+    let lossCount = calls.count
+    reconcilePass(status)
+    try assert(!active && sleep == 1 && !calls.dropFirst(lossCount).contains("/usr/bin/pmset sleepnow"), "Wi-Fi loss must not put an attached adapter to sleep")
+    status.interface = nil; testMatchingAdapter = nil
+    reconcilePass(status)
+    try assert(sleep == 0 && !fm.fileExists(atPath: powerPath) && calls.last == "/usr/bin/pmset sleepnow", "Removal with lid closed must restore and request sleep")
+
+    testMatchingAdapter = "en9"; testLidClosed = false
+    status.interface = "en9"; status.upstream = true
+    cooldown = .distantPast
+    reconcilePass(status)
+    fault = "/usr/sbin/sysctl -w net.inet.ip.forwarding=0"
+    status.interface = nil; testMatchingAdapter = nil
+    reconcilePass(status)
+    try assert(sleep == 0 && fm.fileExists(atPath: statePath), "Network cleanup failure must still release adapter power hold")
+    try recoverSettings()
+
+    fault = "/usr/bin/pmset disablesleep 1"
+    do { try holdPower(); throw Failure("Missing power failure") }
+    catch { try assert(fault == nil, "Power failure not exercised") }
+    try assert(fm.fileExists(atPath: powerPath), "Failed power acquisition needs recovery journal")
+    try holdPower()
+    fault = "/usr/bin/pmset disablesleep 0"
+    do { try restorePower(sleepAfter: false); throw Failure("Missing restoration failure") }
+    catch { try assert(fault == nil, "Power restoration failure not exercised") }
+    try assert(fm.fileExists(atPath: powerPath), "Failed power restoration must retain journal")
+    currentBoot = "boot-four"
+    try recoverSettings()
+    try assert(sleep == 0 && !fm.fileExists(atPath: powerPath), "Power hold must recover across reboot with adapter absent")
+    sleep = 1
+    try holdPower()
+    testLidClosed = true
+    let externalPowerCount = calls.count
+    try restorePower(sleepAfter: true)
+    try assert(sleep == 1 && !calls.dropFirst(externalPowerCount).contains("/usr/bin/pmset sleepnow"), "Existing external sleep override must be preserved")
+    sleep = 0; testLidClosed = false
+
+    testMatchingAdapter = "en9"
+    let refusalCount = calls.count
+    var refused = false
+    do { try restartService { throw Failure("Must not recover with adapter present") } }
+    catch { refused = true }
+    try assert(refused && calls.count == refusalCount, "Restart must refuse attached adapter before touching service")
+    testMatchingAdapter = nil
+    try pauseForCurrentBoot()
+    let restartCount = calls.count
+    try restartService {
+        try assert(calls.last == "/bin/launchctl bootout system/local.ethernetshare", "Recovery must follow bootout")
+        try recoverSettings()
+    }
+    try assert(calls.dropFirst(restartCount).contains("/bin/launchctl bootstrap system /Library/LaunchDaemons/local.ethernetshare.plist") && pausedForCurrentBoot(), "Restart must bootstrap and preserve pause")
+    let failedRestartCount = calls.count
+    do { try restartService { throw Failure("Injected recovery failure") } } catch { }
+    try assert(!calls.dropFirst(failedRestartCount).contains { $0.contains("bootstrap") }, "Failed recovery must prevent bootstrap")
+    print("Passed: network rollback/retry, inherited forwarding, adapter power lifecycle, startup failure, removal, legacy/new reboot recovery, pause and restart ordering/refusal.")
 }
 #endif
 
@@ -768,7 +925,8 @@ do {
         print("Adapter: \(c.interface ?? "absent"), AC: \(c.ac), link: \(c.link), Wi-Fi upstream: \(c.upstream), lid closed: \(c.lidClosed)")
         if geteuid() == 0 {
             try secureDirectory()
-            print("Paused: \(c.paused), recovery/session state: \(try loadState() != nil)")
+            print("Paused: \(c.paused), recovery/session state: \(try loadState() != nil), adapter power hold: \(try loadPower() != nil)")
+            print("IPv4 forwarding: \(try forwardingValue()) (existing enabled state is preserved)")
             print(try run("/usr/bin/pmset", ["-g"]))
             print(try run("/sbin/pfctl", ["-a", anchor, "-sn"]))
         } else { print("Use sudo for session, pause and PF status.") }
@@ -778,8 +936,9 @@ do {
         else if fm.fileExists(atPath: pausedPath) { try fm.removeItem(atPath: pausedPath) }
         try run("/bin/launchctl", ["kill", "SIGUSR1", "system/local.ethernetshare"])
         print(command == "stop" ? "Paused for this boot; daemon will clean up. Reboot or run start to resume automatic sharing." : "Automatic sharing resumed; waiting for adapter and Wi-Fi.")
-    case "recover": try acquireLock(); try cleanup(sleepAfter: false)
-    default: throw Failure("Usage: ethernetshared {check-config|watch|observe|status|start|stop|recover|self-test|process-test|rules}")
+    case "recover": try acquireLock(); try recoverSettings()
+    case "restart": try secureDirectory(); try restartService(recover: recoverStoppedService)
+    default: throw Failure("Usage: ethernetshared {check-config|watch|observe|status|start|stop|restart|recover|self-test|process-test|rules}")
     }
 } catch {
     log("ERROR: \(error)")
