@@ -1,39 +1,21 @@
 # Mac Ethernet Share
 
-Share a Mac's Wi-Fi connection with an Ethernet-connected device: a computer,
-game console, development board, or another device that supports manual IPv4 settings.
-A Swift daemon watches network and hardware events and starts sharing when the
-selected Ethernet adapter and upstream connection are ready.
+Automatically share a Mac's Wi-Fi connection with one Ethernet device, such as a PS5. Plug in the configured adapter and connect the device; the service starts sharing when Wi-Fi and the Ethernet link are ready.
 
-No third-party runtime, DHCP server, or device-specific software is required.
-Sharing supports **one client IPv4 address at a time**.
+![Ethernet Share dashboard open in Safari](docs/dashboard-safari.png)
 
 ## Why this project exists
 
-This project began in a university dorm room. My PS5 could not connect directly
-to the eduroam network, so I used my MacBook as a bridge between Wi-Fi and a USB
-Ethernet adapter. I wanted the connection to become available automatically as
-soon as I plugged in the adapter, without repeating a series of network and power
-commands every time.
-
-The original setup was built for that PS5, but the same problem applies to many
-devices that cannot join an enterprise Wi-Fi network. The project is now generic:
-it can share a Mac's Wi-Fi connection with any Ethernet client that supports the
-documented static IPv4 configuration.
+My PS5 could not join my university's eduroam Wi-Fi, so I connected it through my MacBook and a USB Ethernet adapter. I built this to make sharing automatic instead of repeating network and power commands each time. It also works with other Ethernet devices that support manual IPv4 settings.
 
 ## Requirements
 
-- macOS with Xcode Command Line Tools (`xcode-select --install`).
-- An Ethernet adapter supported by macOS and a working Wi-Fi connection.
-- Administrator access to install and control the service.
-- A client that supports a static IPv4 address.
+- macOS, Xcode Command Line Tools (`xcode-select --install`), and administrator access.
+- A working Wi-Fi connection and a macOS-supported Ethernet adapter.
+- An Ethernet device that supports a static IPv4 address.
+- Node.js 20.19+ (or 22.12+) and npm **only if you want the dashboard**.
 
-The implementation uses macOS PF, IOKit, SystemConfiguration, and `launchd`.
-Hardware behavior, especially closed-lid operation, varies by Mac and macOS release.
-
-## Configure and install
-
-Clone the repository and inspect the hardware ports:
+## Install
 
 ```bash
 git clone https://github.com/kaanunsel/mac-ethernet-share.git
@@ -42,358 +24,74 @@ networksetup -listallhardwareports
 cp Configuration.example.swift Configuration.local.swift
 ```
 
-Edit `Configuration.local.swift`:
-
-```swift
-enum Configuration {
-    static let ethernetMAC = "02:00:00:00:00:01" // Replace with your Ethernet adapter's MAC.
-    static let upstreamInterface = "en0"       // Replace with your Wi-Fi interface.
-}
-```
-
-Use the Ethernet adapter's hardware address on the **Mac**, not the client's address.
-The daemon resolves the adapter's current interface name by MAC address, so an
-interface number change does not require rebuilding. It does not require a specific
-USB vendor, product, or serial number. The local configuration is ignored by Git.
-The selected upstream must be the primary IPv4 interface; VPN routes that change
-that interface stop sharing. This project is intended for Wi-Fi-to-Ethernet use.
-
-Build, check, and install:
+Edit `Configuration.local.swift`: set `ethernetMAC` to the **Mac adapter's** Ethernet Address from `networksetup`, and `upstreamInterface` to the Wi-Fi device name (usually `en0`). Then run:
 
 ```bash
 bash tests/check.sh
-.build/ethernetshared check-config
 sudo bash install.sh
-./ethernet-share.sh status
 ./ethernet-share.sh start
 ```
 
-A fresh installation starts paused for the current boot. `start` enables automatic
-sharing immediately. A reboot clears this pause, so the daemon can start sharing
-when the configured adapter is ready. The example configuration deliberately has
-no adapter address: builds and tests work, but installation refuses it until configured.
+A fresh install starts paused until `start` is run. Sharing starts when the selected adapter, its cable, and the Wi-Fi upstream are ready.
 
-Configure the Ethernet client manually:
+Set these **manual IPv4 settings on the Ethernet device**:
 
 | Setting | Value |
 | --- | --- |
-| IPv4 address | `192.168.2.2` |
+| IP address | `192.168.2.2` |
 | Subnet mask | `255.255.255.0` |
-| Gateway | `192.168.2.1` |
-| DNS servers | `1.1.1.1`, `8.8.8.8` (or your preferred reachable DNS servers) |
+| Gateway/router | `192.168.2.1` |
+| DNS | `1.1.1.1`, `8.8.8.8` |
 
-The subnet and client address are currently fixed. No DHCP or IPv6 routing is
-provided. The Mac's downstream interface must have no non-link-local IPv4 address
-before sharing starts. An existing route for `192.168.2.0/24` prevents startup;
-use an upstream network that does not overlap this subnet. Broader overlapping
-routes are not comprehensively detected.
+The subnet is fixed at `192.168.2.0/24`. The service supports one client; it does not provide DHCP or IPv6 routing. Before sharing starts, the adapter must not have another IPv4 address or a conflicting route.
 
-## Everyday use
+## Dashboard
 
 ```bash
-./ethernet-share.sh start   # Enable automatic sharing
-./ethernet-share.sh stop    # Pause until start or the next reboot
-./ethernet-share.sh restart # Unplug adapter, recover settings, restart the daemon
-./ethernet-share.sh status  # Inspect adapter, upstream, power, pause, and PF state
-./ethernet-share.sh logs    # Follow the last 100 log lines; Ctrl+C to exit
+./dashboard.sh install
+./dashboard.sh open
 ```
 
-For the shorter `ethernetshare <command>` form, add an alias to `~/.zshrc`
-using the absolute path to your checkout:
+`install` starts the local dashboard at [http://127.0.0.1:3847](http://127.0.0.1:3847) and adds a login item. Use `open` for the first visit in each browser, then select **Enable management** and approve the macOS administrator prompt to unlock controls and protected logs. The dashboard runs only on this Mac.
+
+The dashboard shows live connection status, traffic, activity, and diagnostics. It also has configuration and service controls, English/Turkish language selection, light/dark themes, and explanations for network terms. Traffic history reaches six hours while the dashboard service runs; it resets when that process restarts.
+
+If you prefer `ethernetshare dashboard`, add this alias to `~/.zshrc` using the absolute path to your clone, then open a new terminal:
 
 ```bash
 alias ethernetshare='/absolute/path/to/mac-ethernet-share/ethernet-share.sh'
 ```
 
-Reload with `source ~/.zshrc` or open a new terminal, then use:
+## Everyday commands
 
 ```bash
-ethernetshare logs
-ethernetshare restart
-ethernetshare start
-ethernetshare stop
-ethernetshare status
-ethernetshare dashboard
+./ethernet-share.sh status   # Check the connection
+./ethernet-share.sh logs     # Follow service logs; Ctrl+C to exit
+./ethernet-share.sh stop     # Pause sharing until start or the next reboot
+./ethernet-share.sh start    # Resume automatic sharing
+./ethernet-share.sh restart  # Unplug the adapter first, then recover and restart
 ```
 
-Replace any older `ethernetshare` alias that appended `start`. This alias only
-changes command access; automatic sharing and manual pause/resume behavior stay
-the same. Without a subcommand, `ethernetshare` displays status.
+While automation is enabled and the adapter is attached, the service prevents system sleep even on battery or with the lid closed; removing the adapter or pausing restores the previous setting. Battery use can increase. Do not use another router or macOS Internet Sharing on the same adapter/subnet; VPN routes that replace the primary Wi-Fi interface are unsupported.
 
-Sharing starts when the selected adapter is present, its Ethernet link is up, the
-configured upstream is primary and has a non-link-local IPv4 address, and automation
-is enabled. It stops when any of these conditions disappears. Power-source changes
-are logged; both AC and battery operation are supported.
+## Update, troubleshoot, or remove
 
-The daemon handles adapter/network/power notifications and reconciles every ten
-seconds while the Mac is awake. It works at the lock screen after the Mac has booted.
-A sleeping Mac is not guaranteed to wake on adapter insertion. FileVault unlock,
-USB accessory permission, or Wi-Fi authentication may require user interaction.
+For a code update with the same configuration, run `bash tests/check.sh` and `sudo bash install.sh`. You can also use **Configuration → Service maintenance → Install service update** in the dashboard. An upgrade may briefly interrupt sharing.
 
-## Power and network behavior
+Start troubleshooting with `./ethernet-share.sh status` and `./ethernet-share.sh logs`. If the dashboard reports **untracked forwarding** after upgrading from an older build, wait until the client can disconnect, then reboot the Mac to clear stale network state. To restart a stuck service, unplug the adapter and run `./ethernet-share.sh restart`.
 
-- While the selected adapter is attached and automation is enabled, the daemon uses
-  the system-wide `pmset disablesleep`
-  setting to keep the Mac awake, including with the lid closed. It restores the
-  previous value on removal or manual stop. This works on battery and AC, even
-  before the Ethernet link or Wi-Fi is ready and if network startup fails.
-  Display sleep and other power settings are unchanged.
-  Battery sharing can drain the battery; keep the Mac on a ventilated surface and
-  disconnect the adapter before putting it in a bag.
-- Removing the adapter or pausing restores the previous sleep setting. If the lid
-  is closed and sleep was previously enabled, the daemon then requests sleep.
-  Losing Wi-Fi or the Ethernet link tears down sharing but keeps the Mac awake
-  while the adapter remains attached. No wake timers are installed.
-- A persistent recovery journal records changes before they occur. Startup attempts
-  cleanup after a crash; failures retain the journal for retry. Across boots only
-  the persistent sleep setting is restored, not stale PF/interface state.
-  Boot identity uses `kern.bootsessionuuid`, so wall-clock corrections cannot be
-  mistaken for a reboot. Legacy timestamp records are accepted when their boot
-  seconds still match (microsecond/date-string drift is ignored). An ambiguous
-  legacy journal is retained for explicit recovery; an ambiguous old pause stays
-  paused until `start`, rather than silently resuming.
-- Rules live in `com.apple/ethernetshare`, using Apple's existing wildcard hooks.
-  The daemon never replaces the root PF ruleset or disables PF globally. It releases
-  only its own PF reference token. A crash at token acquisition can still leave an
-  orphaned reference; inspect `sudo pfctl -s References` if necessary.
-- NAT is limited to the client's `/32` address. Incoming traffic from that client to
-  the Mac itself is blocked; IPv6 on the downstream interface is blocked. An IP
-  address is not authentication. No inbound port forwarding is configured.
-- IPv4 forwarding is global. An already-enabled flag is preserved: it does not
-  prove that another service owns the adapter or the downstream subnet. When the
-  daemon enables forwarding itself, it restores the previous value on cleanup.
-  Adapter-address and subnet-route conflict checks still apply. Do not configure
-  another router or Internet Sharing on the same adapter/subnet. VPN coexistence
-  is not supported.
-- Cleanup reads IPv4 forwarding again after all other network teardown actions. If
-  the first restoration raced with a network event, it writes the original value
-  once more. It does not delete the recovery journal or log `settings-restored=true`
-  until the restored value has been verified.
-
-## Updates and removal
-
-For code updates with the **same configuration**:
-
-```bash
-bash tests/check.sh
-sudo bash install.sh
-```
-
-Identical installations leave the running service uninterrupted. Real upgrades
-stage and validate new files, preserve the pause state, and attempt rollback if
-installation fails. Sharing can briefly disconnect during an upgrade.
-
-Before changing the adapter or upstream configuration, stop and uninstall the
-existing service so its compiled configuration can clean up its own session:
+Before changing the configured adapter or upstream, stop and uninstall the old service, edit `Configuration.local.swift`, then build and install again:
 
 ```bash
 ./ethernet-share.sh stop
 sudo bash uninstall.sh
-# Edit Configuration.local.swift, then build and install again.
-```
-
-Uninstallation retains recovery state and logs. A retained state directory means a
-later installation preserves the existing pause state instead of treating it as a
-fresh installation. Installed paths are:
-
-| Purpose | Path |
-| --- | --- |
-| Daemon | `/Library/PrivilegedHelperTools/local.ethernetshare/ethernetshared` |
-| Launch daemon | `/Library/LaunchDaemons/local.ethernetshare.plist` |
-| Recovery journal | `/var/db/ethernetshare/` |
-| Logs | `/var/log/ethernetshare.log` |
-| Log rotation | `/etc/newsyslog.d/local.ethernetshare.conf` |
-
-The root service runs the installed binary, never source or scripts from the clone.
-State is root-only; logs have mode `0600` and rotate at 1 MB with seven compressed copies.
-
-## Troubleshooting and recovery
-
-Start with `./ethernet-share.sh status` and `./ethernet-share.sh logs`.
-The daemon refuses to replace an existing adapter IPv4 address or overlapping
-subnet route, or to run without the required PF hooks. Existing global forwarding
-and sleep settings are preserved. The power recovery record is separate from the
-network session, so a failed connection does not release the adapter's sleep hold.
-
-To recover a stuck service, unplug the configured adapter and run:
-
-```bash
-./ethernet-share.sh restart
-```
-
-This stops the launch daemon, waits for its exclusive lock, restores its recorded
-network and power changes, then starts it again. It preserves the pause state;
-run `start` if you had manually paused sharing. It refuses to run with the adapter
-attached. If recovery fails, it retains the journal and leaves the service stopped
-for diagnosis instead of starting over incomplete cleanup. It never blindly
-resets global forwarding or flushes other services' PF rules.
-
-### Client works but startup reports an existing IPv4 address
-
-Earlier versions used the full `kern.boottime` text as a boot identifier. Its
-microseconds can change without a reboot. On a client link-down event, that could
-send cleanup through its previous-boot branch: the journal was removed while the
-Mac's gateway address and PF rules remained. The next link-up then refused that
-address, even though the existing forwarding could still carry client traffic.
-This is a recovery-state bug, not merely a cosmetic log message. The current code
-uses the stable kernel boot-session UUID and includes clock-drift regression tests.
-
-Upgrading prevents new occurrences; it cannot reconstruct a recovery journal
-that an older version has already deleted. A dashboard **untracked forwarding**
-warning means the running connection still needs a controlled reset. Do not delete
-arbitrary adapter addresses or disable PF globally to silence the error. When the
-client can disconnect, install the fixed build and reboot the Mac to discard
-stale per-boot interface/PF state and orphaned PF reference tokens. Re-enable
-sharing if an older ambiguous pause marker was preserved. A reboot is deliberately
-not initiated by the dashboard.
-
-For manual recovery, stop the launch daemon before taking its exclusive lock:
-
-```bash
-sudo launchctl bootout system/local.ethernetshare
-sudo /Library/PrivilegedHelperTools/local.ethernetshare/ethernetshared recover
-sudo launchctl bootstrap system /Library/LaunchDaemons/local.ethernetshare.plist
-```
-
-If migrating from an earlier version with a different service name, stop and
-uninstall that version using its own checkout first. Do not run both versions.
-The original prototype and documentation remain available in Git history; they
-are not supported installation instructions for this version.
-
-## Development and validation
-
-```bash
 bash tests/check.sh
-.build/ethernetshared rules     # Print rules without installing them
-.build/ethernetshared observe   # Watch conditions without changing network/power settings
+sudo bash install.sh
+./ethernet-share.sh start
 ```
 
-Checks compile Swift with warnings as errors, validate shell/plist/log formats,
-exercise the child-process helper, and test policy, recovery, partial-start failures,
-inherited forwarding, adapter-based power holds, cleanup retries, restart ordering,
-event coalescing, pause expiry, and power-loss recovery using
-simulated system commands. PF syntax is parsed without loading rules.
-These tests do not install the service or change network/power settings.
-
-Hardware acceptance remains manual: verify client connectivity, unplug/replug,
-upstream loss, pause/resume, AC-to-battery transition, lid close/open, daemon restart,
-and reboot recovery on the intended Mac. Closed-lid behavior is not guaranteed.
-
-Contributions are welcome through issues and pull requests. Include your macOS
-version, adapter model, reproduction steps, and sanitized logs when reporting bugs.
+`./dashboard.sh uninstall` removes the dashboard login item without changing the sharing service. Disable management in the dashboard first if you also want to stop its privileged helper.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## Local dashboard
-
-The optional React dashboard runs only on this Mac at **http://127.0.0.1:3847**.
-It adds Node.js 20.19+ (or 22.12+) and npm as development/runtime requirements;
-the sharing daemon itself remains standalone Swift.
-
-```bash
-./dashboard.sh install   # Build, run in the background, and start at login
-./dashboard.sh open      # Connect your default browser (one-time per browser)
-./dashboard.sh status    # Inspect the per-user launch agent
-./dashboard.sh stop      # Stop the web dashboard; sharing is unaffected
-./dashboard.sh start     # Start the installed dashboard again
-./dashboard.sh serve     # Run in the foreground instead (if not already running)
-./dashboard.sh uninstall # Remove the dashboard's login item
-ethernetshare dashboard  # Start it if needed and open it in the default browser
-```
-
-For the first visit in each browser, use `./dashboard.sh open`. It hands off a
-random access key stored in a user-only (0600) file to an HttpOnly, SameSite cookie,
-then removes the key from the URL. Subsequent visits use the plain address above.
-This prevents other local accounts from obtaining management access just by
-connecting to the loopback port. Do not share the initial access URL or
-`.build/dashboard-access.key`. Browser access expires after 30 days without a
-session refresh. Re-run `open` after clearing browser data.
-
-The dashboard provides:
-
-- **Overview:** live adapter/upstream/link state, a connection diagram, interface
-  traffic, power status, pause/resume, and the existing guarded restart operation.
-- **Configuration:** detected hardware ports, adapter MAC and upstream selection,
-  a build-and-install workflow, one-click service update and Mac restart controls,
-  and the static settings to enter on the client.
-- **Activity:** the latest 250 service events, plain-language descriptions,
-  text/error filters, live updates, expandable raw details, and export.
-- **Diagnostics:** readiness, forwarding, power hold, recovery journal, actual PF
-  rules, launchd details, and a JSON export.
-
-Select **Enable management** and approve macOS's administrator prompt. This
-upgrades the installed daemon with JSON status support, preserves its pause state,
-and starts a root-owned helper. A real upgrade can briefly interrupt sharing.
-Without authorization, the dashboard remains a monitor; protected values are
-shown as unavailable. Configuration changes always require a native administrator
-prompt, pause automation, recover using the old installed configuration, build and
-install the new configuration, and leave sharing paused for review. Configuration
-changes have not been live-tested against a second physical adapter.
-
-The web process runs as your normal user and binds exclusively to `127.0.0.1`.
-API access requires the private browser cookie; mutations also require a
-process-local token and same-origin/Host validation. The root
-helper accepts only status, bounded log reads, start, stop, restart, and shutdown
-through `/var/run/ethernetshare-dashboard-<uid>.sock` (mode 0600, owned by that
-user). It cannot run arbitrary caller-supplied shell commands. Disabling management
-terminates the helper without changing sharing. After reboot, re-enable management
-from the UI; the dashboard itself starts automatically at login.
-
-To apply a newer service build, open **Configuration → Service maintenance →
-Install service update**, confirm, and approve the macOS administrator prompt.
-The dashboard builds the current source and uses the normal installer. To clear
-old, untracked forwarding state after an update, use **Restart Mac** in the same
-panel and confirm the scheduled restart. Save other work before doing so.
-
-The dashboard offers English and Turkish, System/Light/Dark appearance, and
-context help on network and power terms. Language and theme choices are saved in
-the browser. Opening **View all** starts Activity at the newest events. Status,
-traffic, and protected logs refresh about every two seconds while the dashboard
-is running; raw exported logs retain their original service text.
-
-Traffic is the selected Ethernet interface's byte counters, not a speed test or
-proof of internet reachability. Upload means traffic received **from the client**;
-download means traffic transmitted **to the client**. Totals are since interface
-counter reset. History is sampled about every two seconds and kept in memory for up to
-six hours. Samples older than 15 minutes are averaged into 30-second chart points;
-history resets when the dashboard process restarts. No traffic is invented
-for an absent interface. A stale-status notice appears when samples are overdue.
-
-If NAT/forwarding exist without a recovery journal, the dashboard reports
-**untracked forwarding**. A client may still have internet access in this state;
-it is not proof that the daemon owns a healthy session. Pausing automation cannot
-safely remove such untracked settings. Diagnose recovery when the client is idle;
-the dashboard does not automatically adopt or erase them.
-
-The fixed `192.168.2.0/24` subnet, single-client policy, PF rules, and adapter-based
-power policy are service invariants, shown in the UI rather than exposed as
-unsupported settings. Client DNS/static addressing must be entered on the client.
-
-Dashboard-specific installed paths:
-
-- Login item: `~/Library/LaunchAgents/local.ethernetshare.dashboard.plist`
-- Web process log: `.build/dashboard.log`
-- Root helper: `/Library/PrivilegedHelperTools/local.ethernetshare-dashboard/ethernetshared`
-- Helper registration: `/Library/LaunchDaemons/local.ethernetshare.dashboard-management.<uid>.plist`
-- Helper startup diagnostics: `/var/log/ethernetshare-dashboard.log`
-
-`dashboard.sh uninstall` removes only the per-user web login item. To remove the
-optional root helper too, first disable management in the UI, then run:
-
-```bash
-sudo launchctl bootout system/local.ethernetshare.dashboard-management.$(id -u)
-sudo rm /Library/LaunchDaemons/local.ethernetshare.dashboard-management.$(id -u).plist
-sudo rm /Library/PrivilegedHelperTools/local.ethernetshare-dashboard/ethernetshared
-sudo rmdir /Library/PrivilegedHelperTools/local.ethernetshare-dashboard
-```
-
-Verification:
-
-```bash
-npm test --prefix dashboard
-DASHBOARD_URL=http://127.0.0.1:3847 npm test --prefix dashboard # Also checks live API guards
-npm run build --prefix dashboard
-bash tests/check.sh
-```
